@@ -30,8 +30,11 @@ tf.app.flags.DEFINE_integer('patch_layer',128,
     """Number of layers in data patch""")
 tf.app.flags.DEFINE_integer('epochs',999999999,
     """Number of epochs for training""")
-tf.app.flags.DEFINE_string('log_dir', './tmp/log',
-    """Directory where to write training and testing event logs """)
+try: # Tensorflow 1.14 imports Abseil which already defines 'log_dir'
+    tf.app.flags.DEFINE_string('log_dir', './tmp/log',
+        """Directory where to write training and testing event logs """)
+except:
+    pass
 tf.app.flags.DEFINE_float('init_learning_rate',1e-2,
     """Initial learning rate""")
 tf.app.flags.DEFINE_float('decay_factor',0.01,
