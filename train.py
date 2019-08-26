@@ -15,7 +15,10 @@ os.environ["CUDA_VISIBLE_DEVICES"] = "0" # e.g. "0,1,2", "0,2"
 
 # tensorflow app flags
 FLAGS = tf.app.flags.FLAGS
-
+# Hack for Tensorflow 1.14, log_dir already defined in Abseil dependency
+for name in list(FLAGS):
+    if name=='log_dir':
+      delattr(FLAGS,name)
 tf.app.flags.DEFINE_string('data_dir', './data',
     """Directory of stored data.""")
 tf.app.flags.DEFINE_string('image_filename','img.nii',
