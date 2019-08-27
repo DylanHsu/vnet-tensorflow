@@ -9,6 +9,7 @@ import os
 import VNet
 import math
 import datetime
+from tensorflow.python import debug as tf_debug
 
 # select gpu devices
 os.environ["CUDA_VISIBLE_DEVICES"] = "0" # e.g. "0,1,2", "0,2" 
@@ -148,8 +149,8 @@ def train():
 
         # patch_shape(batch_size, height, width, depth, channels)
         input_batch_shape = (FLAGS.batch_size, FLAGS.patch_size, FLAGS.patch_size, FLAGS.patch_layer, FLAGS.num_channels) 
-        output_batch_shape = (FLAGS.batch_size, FLAGS.patch_size, FLAGS.patch_size, FLAGS.patch_layer, FLAGS.num_channels) 
-        
+        output_batch_shape = (FLAGS.batch_size, FLAGS.patch_size, FLAGS.patch_size, FLAGS.patch_layer, 1) # 1 for binary classification
+
         images_placeholder, labels_placeholder = placeholder_inputs(input_batch_shape,output_batch_shape)
 
         for batch in range(FLAGS.batch_size):
@@ -185,7 +186,7 @@ def train():
                 )
             
             trainDataset = TrainDataset.get_dataset()
-            trainDataset = trainDataset.shuffle(buffer_size=5)
+            #trainDataset = trainDataset.shuffle(buffer_size=5)
             trainDataset = trainDataset.batch(FLAGS.batch_size)
 
             testTransforms = [
@@ -386,6 +387,7 @@ def train():
 
         # training cycle
         with tf.Session(config=config) as sess:
+            #sess = tf_debug.LocalCLIDebugWrapperSession(sess)
             # Initialize all variables
             sess.run(tf.global_variables_initializer())
             print("{}: Start training...".format(datetime.datetime.now()))
@@ -418,7 +420,7 @@ def train():
                         [image, label] = sess.run(next_element_train)
 
                         image = image[:,:,:,:,:] #image[:,:,:,:,np.newaxis]
-                        label = label[:,:,:,:,:] #label[:,:,:,:,np.newaxis]
+                        label = label[:,:,:,:,np.newaxis]
                         
                         model.is_training = True;
                         train, summary = sess.run([train_op, summary_op], feed_dict={images_placeholder: image, labels_placeholder: label})
