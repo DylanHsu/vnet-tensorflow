@@ -56,35 +56,48 @@ class NiftiDataset(object):
   def input_parser(self,image_path, label_path):
     # read image and label
     image = self.read_image(image_path.decode("utf-8"))
-     # cast image and label
+    # cast image and label
     castImageFilter = sitk.CastImageFilter()
-    castImageFilter.SetOutputPixelType(sitk.sitkInt16)
-    image = castImageFilter.Execute(image)
-
     if self.train:
       label = self.read_image(label_path.decode("utf-8"))
       castImageFilter.SetOutputPixelType(sitk.sitkInt8)
       label = castImageFilter.Execute(label)
     else:
+      # Not sure this handles the case where "image" is 4D
       label = sitk.Image(image.GetSize(),sitk.sitkInt8)
       label.SetOrigin(image.GetOrigin())
       label.SetSpacing(image.GetSpacing())
 
-    sample = {'image':image, 'label':label}
-
+    castImageFilter.SetOutputPixelType(sitk.sitkInt16)
+    # Workaround: convert to 4D Numpy then back to 3D SimpleITK images
+    # This will have length N, where N is the number of (MRI) series
+    image_np = sitk.GetArrayFromImage(image)
+    itkImages3d = []
+    if len(image_np.shape) == 3:
+      itkImages3d = [image_np]
+    else:
+      for i in range(image_np.shape[0]): 
+        volume = image_np[i]
+        itkImage3d = sitk.GetImageFromArray(volume)
+        itkImage3d = castImageFilter.Execute(itkImage3d)
+        itkImages3d += [itkImage3d]
+    # Form the sample dict with the list of 3D ITK Images and the label
+    sample = {'image': itkImages3d, 'label':label}
     if self.transforms:
       for transform in self.transforms:
         sample = transform(sample)
-
+    
     # convert sample to tf tensors
-    image_np = sitk.GetArrayFromImage(sample['image'])
-    label_np = sitk.GetArrayFromImage(sample['label'])
-
+    image_np = [] # New size of image_np, inferred from the transformed shape
+    for volume in sample['image']:
+      image_np += [sitk.GetArrayFromImage(volume)]
     image_np = np.asarray(image_np,np.float32)
+    
+    label_np = sitk.GetArrayFromImage(sample['label'])
     label_np = np.asarray(label_np,np.int32)
 
     # to unify matrix dimension order between SimpleITK([x,y,z]) and numpy([z,y,x])
-    image_np = np.transpose(image_np,(2,1,0))
+    image_np = np.transpose(image_np,(3,2,1,0)) # 0th dimension was the Volume or Channel index
     label_np = np.transpose(label_np,(2,1,0))
 
     return image_np, label_np
@@ -101,12 +114,11 @@ class Normalization(object):
     # normalizeFilter = sitk.NormalizeImageFilter()
     # image, label = sample['image'], sample['label']
     # image = normalizeFilter.Execute(image)
-    resacleFilter = sitk.RescaleIntensityImageFilter()
-    resacleFilter.SetOutputMaximum(255)
-    resacleFilter.SetOutputMinimum(0)
+    rescaleFilter = sitk.RescaleIntensityImageFilter()
+    rescaleFilter.SetOutputMaximum(255)
+    rescaleFilter.SetOutputMinimum(0)
     image, label = sample['image'], sample['label']
-    image = resacleFilter.Execute(image)
-
+    image[:] = [rescaleFilter.Execute(volume) for volume in image]
     return {'image': image, 'label': label}
 
 class StatisticalNormalization(object):
@@ -122,7 +134,8 @@ class StatisticalNormalization(object):
   def __call__(self, sample):
     image, label = sample['image'], sample['label']
     statisticsFilter = sitk.StatisticsImageFilter()
-    statisticsFilter.Execute(image)
+    for volume in image:
+      statisticsFilter.Execute(volume) # This returns None type
 
     intensityWindowingFilter = sitk.IntensityWindowingImageFilter()
     intensityWindowingFilter.SetOutputMaximum(255)
@@ -130,7 +143,8 @@ class StatisticalNormalization(object):
     intensityWindowingFilter.SetWindowMaximum(statisticsFilter.GetMean()+self.sigma*statisticsFilter.GetSigma());
     intensityWindowingFilter.SetWindowMinimum(statisticsFilter.GetMean()-self.sigma*statisticsFilter.GetSigma());
 
-    image = intensityWindowingFilter.Execute(image)
+    # Hack
+    image[:] = [intensityWindowingFilter.Execute(volume) for volume in image]
 
     return {'image': image, 'label': label}
 
@@ -154,7 +168,7 @@ class ManualNormalization(object):
     intensityWindowingFilter.SetWindowMaximum(self.windowMax);
     intensityWindowingFilter.SetWindowMinimum(self.windowMin);
 
-    image = intensityWindowingFilter.Execute(image)
+    image[:] = [intensityWindowingFilter.Execute(volume) for volume in image]
 
     return {'image': image, 'label': label}
 
@@ -171,10 +185,11 @@ class Reorient(object):
     self.order = order
 
   def __call__(self, sample):
+    image, label = sample['image'], sample['label']
     reorientFilter = sitk.PermuteAxesImageFilter()
     reorientFilter.SetOrder(self.order)
-    image = reorientFilter.Execute(sample['image'])
-    label = reorientFilter.Execute(sample['label'])
+    image[:] = [reorientFilter.Execute(volume) for volume in image]
+    label = reorientFilter.Execute(label)
 
     return {'image': image, 'label': label}
 
@@ -187,9 +202,10 @@ class Invert(object):
     self.name = 'Invert'
 
   def __call__(self, sample):
+    image, label = sample['image'], sample['label']
     invertFilter = sitk.InvertIntensityImageFilter()
-    image = invertFilter.Execute(sample['image'],255)
-    label = sample['label']
+    image[:] = [invertFilter.Execute(volume,255) for volume in image]
+    label = label
 
     return {'image': image, 'label': label}
 
@@ -217,8 +233,8 @@ class Resample(object):
   def __call__(self, sample):
     image, label = sample['image'], sample['label']
     
-    old_spacing = image.GetSpacing()
-    old_size = image.GetSize()
+    old_spacing = image[0].GetSpacing()
+    old_size = image[0].GetSize()
     
     new_spacing = self.voxel_size
 
@@ -233,16 +249,14 @@ class Resample(object):
     resampler.SetSize(new_size)
 
     # resample on image
-    resampler.SetOutputOrigin(image.GetOrigin())
-    resampler.SetOutputDirection(image.GetDirection())
-    # print("Resampling image...")
-    image = resampler.Execute(image)
+    resampler.SetOutputOrigin(image[0].GetOrigin())
+    resampler.SetOutputDirection(image[0].GetDirection())
+    image[:] = [resampler.Execute(volume) for volume in image]
 
     # resample on segmentation
     resampler.SetInterpolator(sitk.sitkNearestNeighbor)
     resampler.SetOutputOrigin(label.GetOrigin())
     resampler.SetOutputDirection(label.GetDirection())
-    # print("Resampling segmentation...")
     label = resampler.Execute(label)
 
     return {'image': image, 'label': label}
@@ -269,7 +283,7 @@ class Padding(object):
 
   def __call__(self,sample):
     image, label = sample['image'], sample['label']
-    size_old = image.GetSize()
+    size_old = image[0].GetSize()
     
     if (size_old[0] >= self.output_size[0]) and (size_old[1] >= self.output_size[1]) and (size_old[2] >= self.output_size[2]):
       return sample
@@ -286,14 +300,14 @@ class Padding(object):
       output_size = tuple(output_size)
 
       resampler = sitk.ResampleImageFilter()
-      resampler.SetOutputSpacing(image.GetSpacing())
+      resampler.SetOutputSpacing(image[0].GetSpacing())
       resampler.SetSize(output_size)
 
       # resample on image
       resampler.SetInterpolator(2)
-      resampler.SetOutputOrigin(image.GetOrigin())
-      resampler.SetOutputDirection(image.GetDirection())
-      image = resampler.Execute(image)
+      resampler.SetOutputOrigin(image[0].GetOrigin())
+      resampler.SetOutputDirection(image[0].GetDirection())
+      image[:] = [resampler.Execute(volume) for volume in image]
 
       # resample on label
       resampler.SetInterpolator(sitk.sitkNearestNeighbor)
@@ -338,7 +352,7 @@ class RandomCrop(object):
 
   def __call__(self,sample):
     image, label = sample['image'], sample['label']
-    size_old = image.GetSize()
+    size_old = image[0].GetSize()
     size_new = self.output_size
 
     contain_label = False
@@ -381,7 +395,7 @@ class RandomCrop(object):
       else:
         contain_label = True
 
-    image_crop = roiFilter.Execute(image)
+    image_crop = [roiFilter.Execute(volume) for volume in image]
 
     return {'image': image_crop, 'label': label_crop}
 
@@ -402,7 +416,7 @@ class RandomNoise(object):
 
     # print("Normalizing image...")
     image, label = sample['image'], sample['label']
-    image = self.noiseFilter.Execute(image)
+    image[:] = [self.noiseFilter.Execute(volume) for volume in image]
 
     return {'image': image, 'label': label}
 
@@ -468,15 +482,17 @@ class ConfidenceCrop(object):
     start = [-1,-1,-1] #placeholder for start point array
     end = [self.output_size[0]-1, self.output_size[1]-1,self.output_size[2]-1] #placeholder for start point array
     offset = [-1,-1,-1] #placeholder for start point array
+    # Resize the crop region of interest...
+    # Assuming that all the volumes in image[:] are the same!
     for i in range(3):
       # edge case
       if centroid[i] < (self.output_size[i]/2):
         centroid[i] = int(self.output_size[i]/2)
-      elif (image.GetSize()[i]-centroid[i]) < (self.output_size[i]/2):
-        centroid[i] = image.GetSize()[i] - int(self.output_size[i]/2) -1
+      elif (image[0].GetSize()[i]-centroid[i]) < (self.output_size[i]/2):
+        centroid[i] = image[0].GetSize()[i] - int(self.output_size[i]/2) -1
 
       # get start point
-      while ((start[i]<0) or (end[i]>(image.GetSize()[i]-1))):
+      while ((start[i]<0) or (end[i]>(image[0].GetSize()[i]-1))):
         offset[i] = self.NormalOffset(self.output_size[i],self.sigma[i])
         start[i] = centroid[i] + offset[i] - int(self.output_size[i]/2)
         end[i] = start[i] + self.output_size[i] - 1
@@ -484,7 +500,7 @@ class ConfidenceCrop(object):
     roiFilter = sitk.RegionOfInterestImageFilter()
     roiFilter.SetSize(self.output_size)
     roiFilter.SetIndex(start)
-    croppedImage = roiFilter.Execute(image)
+    croppedImage = [roiFilter.Execute(volume) for volume in image]
     croppedLabel = roiFilter.Execute(label)
 
     return {'image': croppedImage, 'label': croppedLabel}
@@ -516,11 +532,12 @@ class BSplineDeformation(object):
   def __call__(self,sample):
     image, label = sample['image'], sample['label']
     spline_order = 3
-    domain_physical_dimensions = [image.GetSize()[0]*image.GetSpacing()[0],image.GetSize()[1]*image.GetSpacing()[1],image.GetSize()[2]*image.GetSpacing()[2]]
+    # Assuming that all the volumes in image[:] are the same!
+    domain_physical_dimensions = [image[0].GetSize()[0]*image[0].GetSpacing()[0],image[0].GetSize()[1]*image[0].GetSpacing()[1],image[0].GetSize()[2]*image[0].GetSpacing()[2]]
 
     bspline = sitk.BSplineTransform(3, spline_order)
-    bspline.SetTransformDomainOrigin(image.GetOrigin())
-    bspline.SetTransformDomainDirection(image.GetDirection())
+    bspline.SetTransformDomainOrigin(image[0].GetOrigin())
+    bspline.SetTransformDomainDirection(image[0].GetDirection())
     bspline.SetTransformDomainPhysicalDimensions(domain_physical_dimensions)
     bspline.SetTransformDomainMeshSize((10,10,10))
 
@@ -528,7 +545,7 @@ class BSplineDeformation(object):
     originalControlPointDisplacements = np.random.random(len(bspline.GetParameters()))*self.randomness
     bspline.SetParameters(originalControlPointDisplacements)
 
-    image = sitk.Resample(image, bspline)
+    image[:] = [sitk.Resample(volume, bspline) for volume in image]
     label = sitk.Resample(label, bspline)
     return {'image': image, 'label': label}
 

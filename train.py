@@ -27,6 +27,8 @@ tf.app.flags.DEFINE_string('label_filename','label.nii',
     """Label filename""")
 tf.app.flags.DEFINE_integer('batch_size',1,
     """Size of batch""")               
+tf.app.flags.DEFINE_integer('num_channels',4,
+    """Number of channels (MRI series)""")               
 tf.app.flags.DEFINE_integer('patch_size',128,
     """Size of a data patch""")
 tf.app.flags.DEFINE_integer('patch_layer',128,
@@ -145,8 +147,8 @@ def train():
         global_step = tf.train.get_or_create_global_step()
 
         # patch_shape(batch_size, height, width, depth, channels)
-        input_batch_shape = (FLAGS.batch_size, FLAGS.patch_size, FLAGS.patch_size, FLAGS.patch_layer, 1) 
-        output_batch_shape = (FLAGS.batch_size, FLAGS.patch_size, FLAGS.patch_size, FLAGS.patch_layer, 1) 
+        input_batch_shape = (FLAGS.batch_size, FLAGS.patch_size, FLAGS.patch_size, FLAGS.patch_layer, FLAGS.num_channels) 
+        output_batch_shape = (FLAGS.batch_size, FLAGS.patch_size, FLAGS.patch_size, FLAGS.patch_layer, FLAGS.num_channels) 
         
         images_placeholder, labels_placeholder = placeholder_inputs(input_batch_shape,output_batch_shape)
 
@@ -415,8 +417,8 @@ def train():
                     try:
                         [image, label] = sess.run(next_element_train)
 
-                        image = image[:,:,:,:,np.newaxis]
-                        label = label[:,:,:,:,np.newaxis]
+                        image = image[:,:,:,:,:] #image[:,:,:,:,np.newaxis]
+                        label = label[:,:,:,:,:] #label[:,:,:,:,np.newaxis]
                         
                         model.is_training = True;
                         train, summary = sess.run([train_op, summary_op], feed_dict={images_placeholder: image, labels_placeholder: label})
