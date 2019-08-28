@@ -63,8 +63,8 @@ def convolution_block_2(layer_input, fine_grained_features, num_convolutions, ke
         with tf.variable_scope('conv_' + str(i+1)):
             x = convolution(x, [5, 5, 5, n_channels, n_channels])
             x = tf.layers.batch_normalization(x, momentum=0.99, epsilon=0.001,center=True, scale=True,training=is_training)
-            layer_input = tf.layers.batch_normalization(x, momentum=0.99, epsilon=0.001,center=True, scale=True,training=is_training)
             if i == num_convolutions - 1:
+                layer_input = tf.layers.batch_normalization(x, momentum=0.99, epsilon=0.001,center=True, scale=True,training=is_training)
                 x = x + layer_input
             x = tf.layers.batch_normalization(x, momentum=0.99, epsilon=0.001,center=True, scale=True,training=is_training)
             x = tf.layers.batch_normalization(x, momentum=0.99, epsilon=0.001,center=True, scale=True,training=is_training)
