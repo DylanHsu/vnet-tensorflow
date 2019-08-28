@@ -30,6 +30,8 @@ tf.app.flags.DEFINE_string('label_filename','label.nii',
     """Label filename""")
 tf.app.flags.DEFINE_integer('batch_size',1,
     """Size of batch""")               
+tf.app.flags.DEFINE_integer('accum_batches',1,
+    """Accumulate the gradient over this many batches before updating the gradient (1 = no accumulation)""")               
 tf.app.flags.DEFINE_integer('num_channels',4,
     """Number of channels (MRI series)""")               
 tf.app.flags.DEFINE_integer('patch_size',128,
@@ -378,9 +380,24 @@ def train():
             else:
                 sys.exit("Invalid loss function");
 
-            train_op = optimizer.minimize(
-                loss = loss_fn,
-                global_step=global_step)
+            # train on single batch, unused
+            #train_op = optimizer.minimize(
+            #    loss = loss_fn,
+            #    global_step=global_step)
+
+            t_vars = tf.trainable_variables()
+            # create a copy of all trainable variables with `0` as initial values
+            accum_tvars = [tf.Variable(tf.zeros_like(t_var.initialized_value()),trainable=False) for t_var in t_vars]                                        
+            # create a op to initialize all accums vars
+            zero_op = [t_var.assign(tf.zeros_like(t_var)) for t_var in accum_tvars]
+            
+            # compute gradients for a batch
+            batch_grads_vars = optimizer.compute_gradients(loss_fn, t_vars)
+            # collect the batch gradient into accumulated vars
+            accum_op = [accum_tvars[i].assign_add(batch_grad_var[0]) for i, batch_grad_var in enumerate(batch_grads_vars)]
+            
+            # apply accums gradients 
+            apply_gradients_op = optimizer.apply_gradients([(accum_tvars[i], batch_grad_var[1]) for i, batch_grad_var in enumerate(batch_grads_vars)])
 
         # # epoch checkpoint manipulation
         start_epoch = tf.get_variable("start_epoch", shape=[1], initializer= tf.zeros_initializer,dtype=tf.int32)
@@ -420,63 +437,67 @@ def train():
 
             # loop over epochs
             for epoch in np.arange(start_epoch.eval(), FLAGS.epochs):
-                # initialize iterator in each new epoch
-                sess.run(train_iterator.initializer)
-                sess.run(test_iterator.initializer)
-                print("{}: Epoch {} starts".format(datetime.datetime.now(),epoch+1))
+              # initialize iterator in each new epoch
+              sess.run(train_iterator.initializer)
+              sess.run(test_iterator.initializer)
+              print("{}: Epoch {} starts".format(datetime.datetime.now(),epoch+1))
 
-                # training phase
-                train_loss_avg = 0.0
-                n_train = 0
-                while True:
-                    try:
-                        [image, label] = sess.run(next_element_train)
+              # training phase
+              train_loss_avg = 0.0
+              n_train = 0
+              model.is_training = True;
+              while True:
+                try:
+                  sess.run(zero_op) # reset gradient accumulation
+                  n_batches = FLAGS.accum_batches # number of batches for gradient accumulation 
+                  for i in range(n_batches):
+                    [image, label] = sess.run(next_element_train)
+                    image = image[:,:,:,:,:] #image[:,:,:,:,np.newaxis]
+                    label = label[:,:,:,:,np.newaxis]
+                    train, train_loss, summary = sess.run([accum_op, loss_fn, summary_op], feed_dict={images_placeholder: image, labels_placeholder: label})
+                    train_summary_writer.add_summary(summary, global_step=tf.train.global_step(sess, global_step))
+                    train_loss_avg += train_loss
+                    n_train += 1
+                  sess.run(apply_gradients_op)
+                except tf.errors.OutOfRangeError:
+                  # Compute the accumulated gradient even if we didn't run over a full set of n_batches. Should we really do this?
+                  sess.run(apply_gradients_op)
+                  # Compute the average training loss across all batches in the epoch.
+                  train_loss_avg = train_loss_avg / n_train
+                  print("{0}: Average training loss is {1:.3f}".format(datetime.datetime.now(), train_loss_avg))
+                  start_epoch_inc.op.run()
+                  # print(start_epoch.eval())
+                  # save the model at end of each epoch training
+                  print("{}: Saving checkpoint of epoch {} at {}...".format(datetime.datetime.now(),epoch+1,FLAGS.checkpoint_dir))
+                  if not (os.path.exists(FLAGS.checkpoint_dir)):
+                      os.makedirs(FLAGS.checkpoint_dir,exist_ok=True)
+                  saver.save(sess, checkpoint_prefix, 
+                      global_step=tf.train.global_step(sess, global_step),
+                      latest_filename="checkpoint-latest")
+                  print("{}: Saving checkpoint succeed".format(datetime.datetime.now()))
+                  break
+              
+              # testing phase
+              print("{}: Training of epoch {} finishes, testing start".format(datetime.datetime.now(),epoch+1))
+              test_loss_avg = 0.0
+              n_test = 0
+              while True:
+                try:
+                  [image, label] = sess.run(next_element_test)
 
-                        image = image[:,:,:,:,:] #image[:,:,:,:,np.newaxis]
-                        label = label[:,:,:,:,np.newaxis]
-                        
-                        model.is_training = True;
-                        train, train_loss, summary = sess.run([train_op, loss_fn, summary_op], feed_dict={images_placeholder: image, labels_placeholder: label})
-                        train_summary_writer.add_summary(summary, global_step=tf.train.global_step(sess, global_step))
-                        train_loss_avg += train_loss
-                        n_train += 1
+                  image = image[:,:,:,:,:] #image[:,:,:,:,np.newaxis]
+                  label = label[:,:,:,:,np.newaxis]
+                  
+                  model.is_training = False;
+                  test_loss, summary = sess.run([loss_fn, summary_op], feed_dict={images_placeholder: image, labels_placeholder: label})
+                  test_summary_writer.add_summary(summary, global_step=tf.train.global_step(sess, global_step))
+                  test_loss_avg += test_loss
+                  n_test += 1
 
-                    except tf.errors.OutOfRangeError:
-                        train_loss_avg = train_loss_avg / n_train
-                        print("{0}: Average training loss is {1:.3f}".format(datetime.datetime.now(), train_loss_avg))
-                        start_epoch_inc.op.run()
-                        # print(start_epoch.eval())
-                        # save the model at end of each epoch training
-                        print("{}: Saving checkpoint of epoch {} at {}...".format(datetime.datetime.now(),epoch+1,FLAGS.checkpoint_dir))
-                        if not (os.path.exists(FLAGS.checkpoint_dir)):
-                            os.makedirs(FLAGS.checkpoint_dir,exist_ok=True)
-                        saver.save(sess, checkpoint_prefix, 
-                            global_step=tf.train.global_step(sess, global_step),
-                            latest_filename="checkpoint-latest")
-                        print("{}: Saving checkpoint succeed".format(datetime.datetime.now()))
-                        break
-                
-                # testing phase
-                print("{}: Training of epoch {} finishes, testing start".format(datetime.datetime.now(),epoch+1))
-                test_loss_avg = 0.0
-                n_test = 0
-                while True:
-                    try:
-                        [image, label] = sess.run(next_element_test)
-
-                        image = image[:,:,:,:,:] #image[:,:,:,:,np.newaxis]
-                        label = label[:,:,:,:,np.newaxis]
-                        
-                        model.is_training = False;
-                        test_loss, summary = sess.run([loss_fn, summary_op], feed_dict={images_placeholder: image, labels_placeholder: label})
-                        test_summary_writer.add_summary(summary, global_step=tf.train.global_step(sess, global_step))
-                        test_loss_avg += test_loss
-                        n_test += 1
-
-                    except tf.errors.OutOfRangeError:
-                        test_loss_avg = test_loss_avg / n_test
-                        print("{0}: Average testing loss is {1:.3f}".format(datetime.datetime.now(), test_loss_avg))
-                        break
+                except tf.errors.OutOfRangeError:
+                  test_loss_avg = test_loss_avg / n_test
+                  print("{0}: Average testing loss is {1:.3f}".format(datetime.datetime.now(), test_loss_avg))
+                  break
 
         # close tensorboard summary writer
         train_summary_writer.close()
