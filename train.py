@@ -10,9 +10,11 @@ import VNet
 import math
 import datetime
 from tensorflow.python import debug as tf_debug
+import logging
+logging.getLogger().setLevel(logging.INFO)
 
 # select gpu devices
-os.environ["CUDA_VISIBLE_DEVICES"] = "0" # e.g. "0,1,2", "0,2" 
+#os.environ["CUDA_VISIBLE_DEVICES"] = "0" # e.g. "0,1,2", "0,2" 
 
 # tensorflow app flags
 FLAGS = tf.app.flags.FLAGS
@@ -166,7 +168,8 @@ def train():
         # support multiple image input, but here only use single channel, label file should be a single file with different classes
 
         # Force input pipepline to CPU:0 to avoid operations sometimes ended up at GPU and resulting a slow down
-        with tf.device('/cpu:0'):
+        if True:
+        #with tf.device('/cpu:0'):
             # create transformations to image and labels
             trainTransforms = [
                 NiftiDataset.StatisticalNormalization(2.5),
@@ -186,7 +189,7 @@ def train():
                 )
             
             trainDataset = TrainDataset.get_dataset()
-            #trainDataset = trainDataset.shuffle(buffer_size=5)
+            trainDataset = trainDataset.shuffle(buffer_size=5)
             trainDataset = trainDataset.batch(FLAGS.batch_size)
 
             testTransforms = [
@@ -217,14 +220,22 @@ def train():
 
         # Initialize the model
         with tf.name_scope("vnet"):
+            #model = VNet.VNet(
+            #    num_classes=2, # binary for 2
+            #    keep_prob=1.0, # default 1
+            #    num_channels=16, # default 16 
+            #    num_levels=4,  # default 4
+            #    num_convolutions=(1,2,3,3), # default (1,2,3,3), size should equal to num_levels
+            #    bottom_convolutions=3, # default 3
+            #    activation_fn="prelu") # default relu
             model = VNet.VNet(
-                num_classes=2, # binary for 2
-                keep_prob=1.0, # default 1
-                num_channels=16, # default 16 
-                num_levels=4,  # default 4
-                num_convolutions=(1,2,3,3), # default (1,2,3,3), size should equal to num_levels
-                bottom_convolutions=3, # default 3
-                activation_fn="prelu") # default relu
+                num_classes=2,   
+                keep_prob=1.0,   
+                num_channels=16, 
+                num_levels=2,    
+                num_convolutions=(1,1),
+                bottom_convolutions=1, 
+                activation_fn="relu") 
 
             logits = model.network_fn(images_placeholder)
 
@@ -415,6 +426,8 @@ def train():
                 print("{}: Epoch {} starts".format(datetime.datetime.now(),epoch+1))
 
                 # training phase
+                train_loss_avg = 0.0
+                n_train = 0
                 while True:
                     try:
                         [image, label] = sess.run(next_element_train)
@@ -423,10 +436,14 @@ def train():
                         label = label[:,:,:,:,np.newaxis]
                         
                         model.is_training = True;
-                        train, summary = sess.run([train_op, summary_op], feed_dict={images_placeholder: image, labels_placeholder: label})
+                        train, train_loss, summary = sess.run([train_op, loss_fn, summary_op], feed_dict={images_placeholder: image, labels_placeholder: label})
                         train_summary_writer.add_summary(summary, global_step=tf.train.global_step(sess, global_step))
+                        train_loss_avg += train_loss
+                        n_train += 1
 
                     except tf.errors.OutOfRangeError:
+                        train_loss_avg = train_loss_avg / n_train
+                        print("{0}: Average training loss is {1:.3f}".format(datetime.datetime.now(), train_loss_avg))
                         start_epoch_inc.op.run()
                         # print(start_epoch.eval())
                         # save the model at end of each epoch training
@@ -441,18 +458,24 @@ def train():
                 
                 # testing phase
                 print("{}: Training of epoch {} finishes, testing start".format(datetime.datetime.now(),epoch+1))
+                test_loss_avg = 0.0
+                n_test = 0
                 while True:
                     try:
                         [image, label] = sess.run(next_element_test)
 
-                        image = image[:,:,:,:,np.newaxis]
+                        image = image[:,:,:,:,:] #image[:,:,:,:,np.newaxis]
                         label = label[:,:,:,:,np.newaxis]
                         
                         model.is_training = False;
-                        loss, summary = sess.run([loss_op, summary_op], feed_dict={images_placeholder: image, labels_placeholder: label})
+                        test_loss, summary = sess.run([loss_fn, summary_op], feed_dict={images_placeholder: image, labels_placeholder: label})
                         test_summary_writer.add_summary(summary, global_step=tf.train.global_step(sess, global_step))
+                        test_loss_avg += test_loss
+                        n_test += 1
 
                     except tf.errors.OutOfRangeError:
+                        test_loss_avg = test_loss_avg / n_test
+                        print("{0}: Average testing loss is {1:.3f}".format(datetime.datetime.now(), test_loss_avg))
                         break
 
         # close tensorboard summary writer
