@@ -170,8 +170,7 @@ def train():
         # support multiple image input, but here only use single channel, label file should be a single file with different classes
 
         # Force input pipepline to CPU:0 to avoid operations sometimes ended up at GPU and resulting a slow down
-        if True:
-        #with tf.device('/cpu:0'):
+        with tf.device('/cpu:0'):
             # create transformations to image and labels
             trainTransforms = [
                 NiftiDataset.StatisticalNormalization(2.5),
@@ -191,8 +190,10 @@ def train():
                 )
             
             trainDataset = TrainDataset.get_dataset()
-            trainDataset = trainDataset.shuffle(buffer_size=5)
+            #trainDataset = trainDataset.shuffle(buffer_size=5)
             trainDataset = trainDataset.batch(FLAGS.batch_size)
+            trainDataset = trainDataset.prefetch(buffer_size=FLAGS.batch_size)
+            #trainDataset = trainDataset.apply(tf.contrib.data.prefetch_to_device('/gpu:0'))
 
             testTransforms = [
                 NiftiDataset.StatisticalNormalization(2.5),
@@ -211,8 +212,10 @@ def train():
             )
 
             testDataset = TestDataset.get_dataset()
-            testDataset = testDataset.shuffle(buffer_size=5)
+            #testDataset = testDataset.shuffle(buffer_size=5)
             testDataset = testDataset.batch(FLAGS.batch_size)
+            testDataset = testDataset.prefetch(buffer_size=FLAGS.batch_size)
+            #testDataset = testDataset.apply(tf.contrib.data.prefetch_to_device('/gpu:0'))
             
         train_iterator = trainDataset.make_initializable_iterator()
         next_element_train = train_iterator.get_next()

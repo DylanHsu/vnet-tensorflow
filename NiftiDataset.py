@@ -40,6 +40,7 @@ class NiftiDataset(object):
 
     dataset = tf.data.Dataset.from_tensor_slices((image_paths,label_paths))
 
+    dataset = dataset.shuffle(buffer_size=5)
     dataset = dataset.map(lambda image_path, label_path: tuple(tf.py_func(
       self.input_parser, [image_path, label_path], [tf.float32,tf.int32])))
 
