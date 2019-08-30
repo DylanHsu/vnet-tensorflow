@@ -17,21 +17,21 @@ os.environ["CUDA_VISIBLE_DEVICES"] = "0" # e.g. "0,1,2", "0,2"
 # tensorflow app flags
 FLAGS = tf.app.flags.FLAGS
 
-tf.app.flags.DEFINE_string('data_dir','./data_dental/evaluate',
+tf.app.flags.DEFINE_string('data_dir','./data/evaluate',
     """Directory of evaluation data""")
-tf.app.flags.DEFINE_string('image_filename','image.nii',
+tf.app.flags.DEFINE_string('image_filename','img.nii.gz',
     """Image filename""")
-tf.app.flags.DEFINE_string('model_path','./tmp_dental/ckpt/checkpoint-5665.meta',
+tf.app.flags.DEFINE_string('model_path','./tmp/ckpt/checkpoint-0.meta',
     """Path to saved models""")
-tf.app.flags.DEFINE_string('checkpoint_path','./tmp_dental/ckpt/checkpoint-5665',
+tf.app.flags.DEFINE_string('checkpoint_path','./tmp/ckpt/checkpoint-0',
     """Directory of saved checkpoints""")
-tf.app.flags.DEFINE_integer('patch_size',256,
+tf.app.flags.DEFINE_integer('patch_size',128,
     """Size of a data patch""")
-tf.app.flags.DEFINE_integer('patch_layer',32,
+tf.app.flags.DEFINE_integer('patch_layer',128,
     """Number of layers in data patch""")
-tf.app.flags.DEFINE_integer('stride_inplane', 128,
+tf.app.flags.DEFINE_integer('stride_inplane', 32, 
     """Stride size in 2D plane""")
-tf.app.flags.DEFINE_integer('stride_layer',16,
+tf.app.flags.DEFINE_integer('stride_layer',32, 
     """Stride size in layer direction""")
 tf.app.flags.DEFINE_integer('batch_size',1,
     """Setting batch size (currently only accept 1)""")
@@ -45,7 +45,8 @@ def prepare_batch(image,ijk_patch_indices):
             image_batch.append(image_patch)
 
         image_batch = np.asarray(image_batch)
-        image_batch = image_batch[:,:,:,:,np.newaxis]
+        #image_batch = image_batch[:,:,:,:,np.newaxis]
+        image_batch = image_batch[:,:,:,:]
         image_batches.append(image_batch)
         
     return image_batches
@@ -60,8 +61,8 @@ def evaluate():
     transforms = [
         # NiftiDataset.Normalization(),
         NiftiDataset.StatisticalNormalization(2.5),
-        NiftiDataset.Resample(0.75),
-        NiftiDataset.Padding((FLAGS.patch_size, FLAGS.patch_size, FLAGS.patch_layer))      
+        #NiftiDataset.Resample(0.75),
+        #NiftiDataset.Padding((FLAGS.patch_size, FLAGS.patch_size, FLAGS.patch_layer))      
         ]
 
     config = tf.ConfigProto()
@@ -92,29 +93,39 @@ def evaluate():
                 image = reader.Execute()
 
                 # preprocess the image and label before inference
-                image_tfm = image
-
+                image_np = sitk.GetArrayFromImage(image)
+                itkImages3d = []
+                # Weird NIFTI convention: Dimension 3 is the index!
+                for i in range(image_np.shape[3]): 
+                  volume = image_np[:,:,:,i]
+                  itkImage3d = sitk.GetImageFromArray(volume)
+                  itkImages3d += [itkImage3d]
+               
                 # create empty label in pair with transformed image
-                label_tfm = sitk.Image(image_tfm.GetSize(),sitk.sitkUInt32)
-                label_tfm.SetOrigin(image_tfm.GetOrigin())
+                label_dims = image.GetSize()
+                print('label_dims are ', label_dims)
+                label_tfm = sitk.Image(label_dims,sitk.sitkUInt32)
+                label_tfm.SetOrigin(image.GetOrigin())
                 label_tfm.SetDirection(image.GetDirection())
-                label_tfm.SetSpacing(image_tfm.GetSpacing())
+                label_tfm.SetSpacing(image.GetSpacing())
 
-                sample = {'image':image_tfm, 'label': label_tfm}
+                sample = {'image': itkImages3d, 'label': label_tfm}
 
                 for transform in transforms:
                     sample = transform(sample)
 
-                image_tfm, label_tfm = sample['image'], sample['label']
+                tfmItkImages3d, label_tfm = sample['image'], sample['label']
 
                 # create empty softmax image in pair with transformed image
-                softmax_tfm = sitk.Image(image_tfm.GetSize(),sitk.sitkFloat32)
-                softmax_tfm.SetOrigin(image_tfm.GetOrigin())
+                softmax_tfm = sitk.Image(label_dims,sitk.sitkFloat32)
+                softmax_tfm.SetOrigin(tfmItkImages3d[0].GetOrigin())
                 softmax_tfm.SetDirection(image.GetDirection())
-                softmax_tfm.SetSpacing(image_tfm.GetSpacing())
+                softmax_tfm.SetSpacing(tfmItkImages3d[0].GetSpacing())
 
                 # convert image to numpy array
-                image_np = sitk.GetArrayFromImage(image_tfm)
+                image_np = [] # New size of image_np, inferred from the transformed shape
+                for volume in sample['image']:
+                  image_np += [sitk.GetArrayFromImage(volume)]
                 image_np = np.asarray(image_np,np.float32)
 
                 label_np = sitk.GetArrayFromImage(label_tfm)
@@ -124,9 +135,12 @@ def evaluate():
                 softmax_np = np.asarray(softmax_np,np.float32)
 
                 # unify numpy and sitk orientation
-                image_np = np.transpose(image_np,(2,1,0))
+                image_np = np.transpose(image_np,(3,2,1,0)) # (T,Z,Y,X) -> (X,Y,Z,T) 
                 label_np = np.transpose(label_np,(2,1,0))
                 softmax_np = np.transpose(softmax_np,(2,1,0))
+                print('after transpose, image_np has shape ', image_np.shape)
+                print('after transpose, label_np has shape ', label_np.shape)
+                print('after transpose, softmax_np has shape ', softmax_np.shape)
 
                 # a weighting matrix will be used for averaging the overlapped region
                 weight_np = np.zeros(label_np.shape)
@@ -167,6 +181,7 @@ def evaluate():
                                 ijk_patch_indices.append(ijk_patch_indicies_tmp)
 
                             patch_total += 1
+                            #print('Patch %d will encapsulate (%d,%d,%d) to (%d,%d,%d)' % (patch_total, istart, jstart, kstart, iend, jend, kend))
                 
                 batches = prepare_batch(image_np,ijk_patch_indices)
 
@@ -195,19 +210,26 @@ def evaluate():
 
                 # convert label numpy back to sitk image
                 label_tfm = sitk.GetImageFromArray(label_np)
-                label_tfm.SetOrigin(image_tfm.GetOrigin())
+                #label_tfm.SetOrigin(tfmItkImages3d[0].GetOrigin())
+                #label_tfm.SetDirection(image.GetDirection())
+                #label_tfm.SetSpacing(tfmItkImages3d[0].GetSpacing())
+                label_tfm.SetOrigin(image.GetOrigin())
                 label_tfm.SetDirection(image.GetDirection())
-                label_tfm.SetSpacing(image_tfm.GetSpacing())
+                label_tfm.SetSpacing(image.GetSpacing())
 
                 softmax_tfm = sitk.GetImageFromArray(softmax_np)
-                softmax_tfm.SetOrigin(image_tfm.GetOrigin())
+                #softmax_tfm.SetOrigin(tfmItkImages3d[0].GetOrigin())
+                #softmax_tfm.SetDirection(image.GetDirection())
+                #softmax_tfm.SetSpacing(tfmItkImages3d[0].GetSpacing())
+                softmax_tfm.SetOrigin(image.GetOrigin())
                 softmax_tfm.SetDirection(image.GetDirection())
-                softmax_tfm.SetSpacing(image_tfm.GetSpacing())
+                softmax_tfm.SetSpacing(image.GetSpacing())
 
                 # resample the label back to original space
                 resampler = sitk.ResampleImageFilter()
                 # save segmented label
                 writer = sitk.ImageFileWriter()
+                writer.UseCompressionOn()
 
                 resampler.SetInterpolator(1)
                 resampler.SetOutputSpacing(image.GetSpacing())
@@ -216,14 +238,16 @@ def evaluate():
                 resampler.SetOutputDirection(image.GetDirection())
                 
                 print("{}: Resampling label back to original image space...".format(datetime.datetime.now()))
-                label = resampler.Execute(label_tfm)
+                #label = resampler.Execute(label_tfm)
+                label = label_tfm
                 label_path = os.path.join(FLAGS.data_dir,case,'label_vnet.nii.gz')
                 writer.SetFileName(label_path)
                 writer.Execute(label)
                 print("{}: Save evaluate label at {} success".format(datetime.datetime.now(),label_path))
 
                 print("{}: Resampling probability map back to original image space...".format(datetime.datetime.now()))
-                prob = resampler.Execute(softmax_tfm)
+                #prob = resampler.Execute(softmax_tfm)
+                prob = softmax_tfm
                 prob_path = os.path.join(FLAGS.data_dir,case,'probability_vnet.nii.gz')
                 writer.SetFileName(prob_path)
                 writer.Execute(prob)
