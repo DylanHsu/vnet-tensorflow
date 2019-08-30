@@ -5,13 +5,13 @@ from __future__ import print_function
 import numpy as np
 import tensorflow as tf
 import NiftiDataset
-import os
+import os, sys
 import VNet
 import math
 import datetime
 from tensorflow.python import debug as tf_debug
 import logging
-logging.getLogger().setLevel(logging.INFO)
+#logging.getLogger().setLevel(logging.INFO)
 
 # select gpu devices
 #os.environ["CUDA_VISIBLE_DEVICES"] = "0" # e.g. "0,1,2", "0,2" 
@@ -161,6 +161,7 @@ def train():
             images_log = tf.cast(images_placeholder[batch:batch+1,:,:,:,0], dtype=tf.uint8)
             labels_log = tf.cast(tf.scalar_mul(255,labels_placeholder[batch:batch+1,:,:,:,0]), dtype=tf.uint8)
 
+            # needs attention for 4D support
             tf.summary.image("image", tf.transpose(images_log,[3,1,2,0]),max_outputs=FLAGS.patch_layer)
             tf.summary.image("label", tf.transpose(labels_log,[3,1,2,0]),max_outputs=FLAGS.patch_layer)
 
@@ -172,14 +173,24 @@ def train():
         # Force input pipepline to CPU:0 to avoid operations sometimes ended up at GPU and resulting a slow down
         with tf.device('/cpu:0'):
             # create transformations to image and labels
-            trainTransforms = [
+            testTransforms = [
                 NiftiDataset.StatisticalNormalization(2.5),
                 # NiftiDataset.Normalization(),
-                NiftiDataset.Resample((0.45,0.45,0.45)),
-                NiftiDataset.Padding((FLAGS.patch_size, FLAGS.patch_size, FLAGS.patch_layer)),
-                NiftiDataset.RandomCrop((FLAGS.patch_size, FLAGS.patch_size, FLAGS.patch_layer),FLAGS.drop_ratio,FLAGS.min_pixel),
-                NiftiDataset.RandomNoise()
+                #NiftiDataset.Resample((0.45,0.45,0.45)),
+                #NiftiDataset.Padding((FLAGS.patch_size, FLAGS.patch_size, FLAGS.patch_layer)),
+                NiftiDataset.RandomCrop((FLAGS.patch_size, FLAGS.patch_size, FLAGS.patch_layer),FLAGS.drop_ratio,FLAGS.min_pixel)
                 ]
+            trainTransforms = testTransforms + [NiftiDataset.RandomNoise()]
+            #trainTransforms = testTransforms + [NiftiDataset.RandomNoise()]
+            
+            #trainTransforms = [
+            #    NiftiDataset.StatisticalNormalization(2.5),
+            #    # NiftiDataset.Normalization(),
+            #    NiftiDataset.Resample((0.45,0.45,0.45)),
+            #    NiftiDataset.Padding((FLAGS.patch_size, FLAGS.patch_size, FLAGS.patch_layer)),
+            #    NiftiDataset.RandomCrop((FLAGS.patch_size, FLAGS.patch_size, FLAGS.patch_layer),FLAGS.drop_ratio,FLAGS.min_pixel),
+            #    NiftiDataset.RandomNoise()
+            #    ]
 
             TrainDataset = NiftiDataset.NiftiDataset(
                 data_dir=train_data_dir,
@@ -195,13 +206,13 @@ def train():
             trainDataset = trainDataset.prefetch(buffer_size=FLAGS.batch_size)
             #trainDataset = trainDataset.apply(tf.contrib.data.prefetch_to_device('/gpu:0'))
 
-            testTransforms = [
-                NiftiDataset.StatisticalNormalization(2.5),
-                # NiftiDataset.Normalization(),
-                NiftiDataset.Resample((0.45,0.45,0.45)),
-                NiftiDataset.Padding((FLAGS.patch_size, FLAGS.patch_size, FLAGS.patch_layer)),
-                NiftiDataset.RandomCrop((FLAGS.patch_size, FLAGS.patch_size, FLAGS.patch_layer),FLAGS.drop_ratio,FLAGS.min_pixel)
-                ]
+            #testTransforms = [
+            #    NiftiDataset.StatisticalNormalization(2.5),
+            #    # NiftiDataset.Normalization(),
+            #    NiftiDataset.Resample((0.45,0.45,0.45)),
+            #    NiftiDataset.Padding((FLAGS.patch_size, FLAGS.patch_size, FLAGS.patch_layer)),
+            #    NiftiDataset.RandomCrop((FLAGS.patch_size, FLAGS.patch_size, FLAGS.patch_layer),FLAGS.drop_ratio,FLAGS.min_pixel)
+            #    ]
 
             TestDataset = NiftiDataset.NiftiDataset(
                 data_dir=test_data_dir,
@@ -237,10 +248,10 @@ def train():
                 num_classes=2,   
                 keep_prob=1.0,   
                 num_channels=16, 
-                num_levels=2,    
-                num_convolutions=(1,1),
-                bottom_convolutions=1, 
-                activation_fn="relu") 
+                num_levels=4,    
+                num_convolutions=(1,2,3,3),
+                bottom_convolutions=3, 
+                activation_fn="prelu") 
 
             logits = model.network_fn(images_placeholder)
 
@@ -396,11 +407,12 @@ def train():
             
             # compute gradients for a batch
             batch_grads_vars = optimizer.compute_gradients(loss_fn, t_vars)
+
             # collect the batch gradient into accumulated vars
             accum_op = [accum_tvars[i].assign_add(batch_grad_var[0]) for i, batch_grad_var in enumerate(batch_grads_vars)]
             
             # apply accums gradients 
-            apply_gradients_op = optimizer.apply_gradients([(accum_tvars[i], batch_grad_var[1]) for i, batch_grad_var in enumerate(batch_grads_vars)])
+            apply_gradients_op = optimizer.apply_gradients([(accum_tvars[i], batch_grad_var[1]) for i, batch_grad_var in enumerate(batch_grads_vars)]), global_step=global_step)
 
         # # epoch checkpoint manipulation
         start_epoch = tf.get_variable("start_epoch", shape=[1], initializer= tf.zeros_initializer,dtype=tf.int32)
