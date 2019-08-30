@@ -51,7 +51,9 @@ class NiftiDataset(object):
   def read_image(self,path):
     reader = sitk.ImageFileReader()
     reader.SetFileName(path)
+    #print('DEBUG: reading from "', path, '"')
     image = reader.Execute()
+    #print('DEBUG: done reading from "', path, '"')
     return image
 
   def input_parser(self,image_path, label_path):
@@ -73,20 +75,25 @@ class NiftiDataset(object):
     # Workaround: convert to 4D Numpy then back to 3D SimpleITK images
     # This will have length N, where N is the number of (MRI) series
     image_np = sitk.GetArrayFromImage(image)
+    #print('DEBUG: after GetArrayFromImage, image_np has dims ', image_np.shape)
     itkImages3d = []
     if len(image_np.shape) == 3:
       itkImages3d = [image_np]
     else:
-      for i in range(image_np.shape[0]): 
-        volume = image_np[i]
+      # Weird NIFTI convention: Dimension 3 is the index!
+      for i in range(image_np.shape[3]): 
+        volume = image_np[:,:,:,i]
         itkImage3d = sitk.GetImageFromArray(volume)
         itkImage3d = castImageFilter.Execute(itkImage3d)
         itkImages3d += [itkImage3d]
     # Form the sample dict with the list of 3D ITK Images and the label
     sample = {'image': itkImages3d, 'label':label}
+    #print('DEBUG: done forming sample dict')
     if self.transforms:
       for transform in self.transforms:
+        #print('DEBUG: running transform of object type', transform)
         sample = transform(sample)
+    #print('DEBUG: done transforming')
     
     # convert sample to tf tensors
     image_np = [] # New size of image_np, inferred from the transformed shape
@@ -98,9 +105,10 @@ class NiftiDataset(object):
     label_np = np.asarray(label_np,np.int32)
 
     # to unify matrix dimension order between SimpleITK([x,y,z]) and numpy([z,y,x])
-    image_np = np.transpose(image_np,(3,2,1,0)) # 0th dimension was the Volume or Channel index
+    image_np = np.transpose(image_np,(3,2,1,0)) # (T,Z,Y,X) -> (X,Y,Z,T) 
     label_np = np.transpose(label_np,(2,1,0))
 
+    #print('DEBUG: done tensorifying')
     return image_np, label_np
 
 class Normalization(object):
@@ -354,6 +362,7 @@ class RandomCrop(object):
   def __call__(self,sample):
     image, label = sample['image'], sample['label']
     size_old = image[0].GetSize()
+    #print('DEBUG: size_old for cropping is ', size_old)
     size_new = self.output_size
 
     contain_label = False
