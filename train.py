@@ -162,8 +162,9 @@ def train():
             labels_log = tf.cast(tf.scalar_mul(255,labels_placeholder[batch:batch+1,:,:,:,0]), dtype=tf.uint8)
 
             # needs attention for 4D support
-            tf.summary.image("image", tf.transpose(images_log,[3,1,2,0]),max_outputs=FLAGS.patch_layer)
-            tf.summary.image("label", tf.transpose(labels_log,[3,1,2,0]),max_outputs=FLAGS.patch_layer)
+            # DGH: disable images
+            #tf.summary.image("image", tf.transpose(images_log,[3,1,2,0]),max_outputs=FLAGS.patch_layer)
+            #tf.summary.image("label", tf.transpose(labels_log,[3,1,2,0]),max_outputs=FLAGS.patch_layer)
 
         # Get images and labels
         train_data_dir = os.path.join(FLAGS.data_dir,'training')
@@ -266,21 +267,22 @@ def train():
             logits_log_0 = tf.cast((logits_log_0-logits_min)*255./(logits_max-logits_min), dtype=tf.uint8)
             logits_log_1 = tf.cast((logits_log_1-logits_min)*255./(logits_max-logits_min), dtype=tf.uint8)
 
-            tf.summary.image("logits_0", tf.transpose(logits_log_0,[3,1,2,0]),max_outputs=FLAGS.patch_layer)
-            tf.summary.image("logits_1", tf.transpose(logits_log_1,[3,1,2,0]),max_outputs=FLAGS.patch_layer)
+            # DGH: disable images
+            #tf.summary.image("logits_0", tf.transpose(logits_log_0,[3,1,2,0]),max_outputs=FLAGS.patch_layer)
+            #tf.summary.image("logits_1", tf.transpose(logits_log_1,[3,1,2,0]),max_outputs=FLAGS.patch_layer)
 
-        # # Exponential decay learning rate
-        # train_batches_per_epoch = math.ceil(TrainDataset.data_size/FLAGS.batch_size)
-        # decay_steps = train_batches_per_epoch*FLAGS.decay_steps
+        # Exponential decay learning rate
+        train_batches_per_epoch = math.ceil(TrainDataset.data_size/(FLAGS.batch_size * FLAGS.accum_batches))
+        decay_steps = train_batches_per_epoch*FLAGS.decay_steps
 
         with tf.name_scope("learning_rate"):
             learning_rate = FLAGS.init_learning_rate
-        #     learning_rate = tf.train.exponential_decay(FLAGS.init_learning_rate,
-        #         global_step,
-        #         decay_steps,
-        #         FLAGS.decay_factor,
-        #         staircase=True)
-        tf.summary.scalar('learning_rate', learning_rate)
+            #learning_rate = tf.train.exponential_decay(FLAGS.init_learning_rate,
+            #    global_step,
+            #    decay_steps,
+            #    FLAGS.decay_factor,
+            #    staircase=False)
+        #tf.summary.scalar('learning_rate', learning_rate)
 
         # softmax op for probability layer
         with tf.name_scope("softmax"):
@@ -305,8 +307,9 @@ def train():
             softmax_log_0 = tf.cast(tf.scalar_mul(255,softmax_log_0), dtype=tf.uint8)
             softmax_log_1 = tf.cast(tf.scalar_mul(255,softmax_log_1), dtype=tf.uint8)
            
-            tf.summary.image("softmax_0", softmax_log_0,max_outputs=FLAGS.patch_layer)
-            tf.summary.image("softmax_1", softmax_log_1,max_outputs=FLAGS.patch_layer)
+            # DGH: disable images
+            # tf.summary.image("softmax_0", softmax_log_0,max_outputs=FLAGS.patch_layer)
+            # tf.summary.image("softmax_1", softmax_log_1,max_outputs=FLAGS.patch_layer)
 
             # # this is grayscale one
             # softmax_log_0 = tf.cast(tf.scalar_mul(255,softmax_op[batch:batch+1,:,:,:,0]), dtype=tf.uint8)
@@ -320,10 +323,11 @@ def train():
                 logits=logits,
                 labels=tf.squeeze(labels_placeholder, 
                 squeeze_dims=[4])))
-        tf.summary.scalar('loss',loss_op)
+        #tf.summary.scalar('loss',loss_op)
 
         with tf.name_scope("weighted_cross_entropy"):
-            class_weights = tf.constant([1.0, 1.0])
+            #class_weights = tf.constant([1.0, 1.0])
+            class_weights = tf.constant([1.0, 50.0])
 
             # deduce weights for batch samples based on their true label
             onehot_labels = tf.one_hot(tf.squeeze(labels_placeholder,squeeze_dims=[4]),depth = 2)
@@ -339,34 +343,56 @@ def train():
             # reduce the result to get your final loss
             weighted_loss_op = tf.reduce_mean(weighted_loss)
                 
-        tf.summary.scalar('weighted_loss',weighted_loss_op)
+        #tf.summary.scalar('weighted_loss',weighted_loss_op)
 
         # Argmax Op to generate label from logits
         with tf.name_scope("predicted_label"):
             pred = tf.argmax(logits, axis=4 , name="prediction")
 
-        for batch in range(FLAGS.batch_size):
-            pred_log = tf.cast(tf.scalar_mul(255,pred[batch:batch+1,:,:,:]), dtype=tf.uint8)
-            tf.summary.image("pred", tf.transpose(pred_log,[3,1,2,0]),max_outputs=FLAGS.patch_layer)
+        # DGH: disable images
+        #for batch in range(FLAGS.batch_size):
+        #    pred_log = tf.cast(tf.scalar_mul(255,pred[batch:batch+1,:,:,:]), dtype=tf.uint8)
+        #    tf.summary.image("pred", tf.transpose(pred_log,[3,1,2,0]),max_outputs=FLAGS.patch_layer)
 
         # Accuracy of model
         with tf.name_scope("accuracy"):
             correct_pred = tf.equal(tf.expand_dims(pred,-1), tf.cast(labels_placeholder,dtype=tf.int64))
             accuracy = tf.reduce_mean(tf.cast(correct_pred, tf.float32))
-        tf.summary.scalar('accuracy', accuracy)
+        #tf.summary.scalar('accuracy', accuracy)
 
         # Dice Similarity, currently only for binary segmentation
         with tf.name_scope("dice"):
             # sorensen = dice_coe(tf.expand_dims(softmax_op[:,:,:,:,1],-1),tf.cast(labels_placeholder,dtype=tf.float32), loss_type='sorensen')
             # jaccard = dice_coe(tf.expand_dims(softmax_op[:,:,:,:,1],-1),tf.cast(labels_placeholder,dtype=tf.float32), loss_type='jaccard')
-            sorensen = dice_coe(softmax_op,tf.cast(tf.one_hot(labels_placeholder[:,:,:,:,0],depth=2),dtype=tf.float32), loss_type='sorensen', axis=[1,2,3,4])
-            jaccard = dice_coe(softmax_op,tf.cast(tf.one_hot(labels_placeholder[:,:,:,:,0],depth=2),dtype=tf.float32), loss_type='jaccard', axis=[1,2,3,4])
+            
+            # This is commented out because using all of the True-Negative pixels gives a very deceptive dice score
+            # sorensen = dice_coe(softmax_op,tf.cast(tf.one_hot(labels_placeholder[:,:,:,:,0],depth=2),dtype=tf.float32), loss_type='sorensen', axis=[1,2,3,4])
+            # jaccard = dice_coe(softmax_op,tf.cast(tf.one_hot(labels_placeholder[:,:,:,:,0],depth=2),dtype=tf.float32), loss_type='jaccard', axis=[1,2,3,4])
+            
+            # Computing the dice using only the second row of the 2-entry softmax vector seems more useful
+            sorensen = dice_coe(softmax_op[:,:,:,:,1],tf.cast(labels_placeholder[:,:,:,:,0],dtype=tf.float32), loss_type='sorensen', axis=[1,2,3])
+            jaccard  = dice_coe(softmax_op[:,:,:,:,1],tf.cast(labels_placeholder[:,:,:,:,0],dtype=tf.float32), loss_type='jaccard', axis=[1,2,3])
             sorensen_loss = 1. - sorensen
             jaccard_loss = 1. - jaccard
-        tf.summary.scalar('sorensen', sorensen)
-        tf.summary.scalar('jaccard', jaccard)
-        tf.summary.scalar('sorensen_loss', sorensen_loss)
-        tf.summary.scalar('jaccard_loss',jaccard_loss)
+            
+            sorensen_sum  = tf.get_variable("sorensen_sum" , dtype=tf.float32, trainable=False, initializer=tf.constant(0.))
+            jaccard_sum   = tf.get_variable("jaccard_sum"  , dtype=tf.float32, trainable=False, initializer=tf.constant(0.))
+            sorensen2_sum = tf.get_variable("sorensen2_sum", dtype=tf.float32, trainable=False, initializer=tf.constant(0.))
+            jaccard2_sum  = tf.get_variable("jaccard2_sum" , dtype=tf.float32, trainable=False, initializer=tf.constant(0.))
+            # Number of accumulated batches
+            n_ab = tf.get_variable("n_ab", dtype=tf.float32, trainable=False, use_resource=True, initializer=tf.constant(0.))
+            sorensen_avg = tf.cond(n_ab > 1., lambda: sorensen_sum/n_ab, lambda: tf.constant(0.)) 
+            jaccard_avg  = tf.cond(n_ab > 1., lambda: jaccard_sum /n_ab, lambda: tf.constant(0.)) 
+            sorensen_stdev = tf.cond(n_ab > 1., lambda: tf.math.sqrt( (n_ab*sorensen2_sum - sorensen_sum*sorensen_sum) / (n_ab * (n_ab-1.))), lambda: tf.constant(0.))
+            jaccard_stdev  = tf.cond(n_ab > 1., lambda: tf.math.sqrt( (n_ab*jaccard2_sum  - jaccard_sum*jaccard_sum  ) / (n_ab * (n_ab-1.))), lambda: tf.constant(0.))
+            sorensen_loss_avg = 1. - sorensen_avg
+            jaccard_loss_avg = 1. - jaccard_avg
+        tf.summary.scalar('sorensen_avg', sorensen_avg)
+        tf.summary.scalar('jaccard_avg', jaccard_avg)
+        tf.summary.scalar('sorensen_stdev', sorensen_stdev)
+        tf.summary.scalar('jaccard_stdev', jaccard_stdev)
+        tf.summary.scalar('sorensen_loss_avg', sorensen_loss_avg)
+        tf.summary.scalar('jaccard_loss_avg',jaccard_loss_avg)
 
         # Training Op
         with tf.name_scope("training"):
@@ -412,7 +438,23 @@ def train():
             accum_op = [accum_tvars[i].assign_add(batch_grad_var[0]) for i, batch_grad_var in enumerate(batch_grads_vars)]
             
             # apply accums gradients 
-            apply_gradients_op = optimizer.apply_gradients([(accum_tvars[i], batch_grad_var[1]) for i, batch_grad_var in enumerate(batch_grads_vars)]), global_step=global_step)
+            apply_gradients_op = optimizer.apply_gradients([(accum_tvars[i] / n_ab, batch_grad_var[1]) for i, batch_grad_var in enumerate(batch_grads_vars)], global_step=global_step)
+
+        with tf.name_scope("avgloss"):
+            # Here we accumulate the average loss and square of loss across the accum. batches
+            sum_zero_op = []
+            sum_zero_op += [sorensen_sum.assign(tf.zeros_like(sorensen_sum))]
+            sum_zero_op += [jaccard_sum.assign(tf.zeros_like(jaccard_sum))]
+            sum_zero_op += [sorensen2_sum.assign(tf.zeros_like(sorensen2_sum))]
+            sum_zero_op += [jaccard2_sum.assign(tf.zeros_like(jaccard2_sum))]
+            sum_zero_op += [n_ab.assign(tf.zeros_like(n_ab))]
+
+            sum_accum_op = []
+            sum_accum_op += [sorensen_sum.assign_add(sorensen)]
+            sum_accum_op += [jaccard_sum.assign_add(jaccard)]
+            sum_accum_op += [sorensen2_sum.assign_add(sorensen*sorensen)]
+            sum_accum_op += [jaccard2_sum.assign_add(jaccard*jaccard)]
+            sum_accum_op += [n_ab.assign_add(1.)]
 
         # # epoch checkpoint manipulation
         start_epoch = tf.get_variable("start_epoch", shape=[1], initializer= tf.zeros_initializer,dtype=tf.int32)
@@ -464,20 +506,26 @@ def train():
               while True:
                 try:
                   sess.run(zero_op) # reset gradient accumulation
+                  sess.run(sum_zero_op) # reset loss-averaging
                   n_batches = FLAGS.accum_batches # number of batches for gradient accumulation 
                   for i in range(n_batches):
                     [image, label] = sess.run(next_element_train)
                     image = image[:,:,:,:,:] #image[:,:,:,:,np.newaxis]
                     label = label[:,:,:,:,np.newaxis]
-                    train, train_loss, summary = sess.run([accum_op, loss_fn, summary_op], feed_dict={images_placeholder: image, labels_placeholder: label})
-                    train_summary_writer.add_summary(summary, global_step=tf.train.global_step(sess, global_step))
+                    train, train_loss, sum_accum = sess.run([accum_op, loss_fn, sum_accum_op], feed_dict={images_placeholder: image, labels_placeholder: label})
+                    # This is redundant, remove this when we can get the average loss for all options
                     train_loss_avg += train_loss
                     n_train += 1
                   sess.run(apply_gradients_op)
+                  summary = sess.run(summary_op)
+                  train_summary_writer.add_summary(summary, global_step=tf.train.global_step(sess, global_step))
                 except tf.errors.OutOfRangeError:
                   # Compute the accumulated gradient even if we didn't run over a full set of n_batches. Should we really do this?
                   sess.run(apply_gradients_op)
+                  summary = sess.run(summary_op)
+                  train_summary_writer.add_summary(summary, global_step=tf.train.global_step(sess, global_step))
                   # Compute the average training loss across all batches in the epoch.
+                  # This is now redundant, get the value in the call to sess.run
                   train_loss_avg = train_loss_avg / n_train
                   print("{0}: Average training loss is {1:.3f}".format(datetime.datetime.now(), train_loss_avg))
                   start_epoch_inc.op.run()
@@ -496,6 +544,7 @@ def train():
               print("{}: Training of epoch {} finishes, testing start".format(datetime.datetime.now(),epoch+1))
               test_loss_avg = 0.0
               n_test = 0
+              sess.run(sum_zero_op) # reset loss-averaging
               while True:
                 try:
                   [image, label] = sess.run(next_element_test)
@@ -504,14 +553,16 @@ def train():
                   label = label[:,:,:,:,np.newaxis]
                   
                   model.is_training = False;
-                  test_loss, summary = sess.run([loss_fn, summary_op], feed_dict={images_placeholder: image, labels_placeholder: label})
-                  test_summary_writer.add_summary(summary, global_step=tf.train.global_step(sess, global_step))
+                  test_loss, sum_accum = sess.run([loss_fn, sum_accum_op], feed_dict={images_placeholder: image, labels_placeholder: label})
+                  # This is redundant, fix
                   test_loss_avg += test_loss
                   n_test += 1
 
                 except tf.errors.OutOfRangeError:
                   test_loss_avg = test_loss_avg / n_test
                   print("{0}: Average testing loss is {1:.3f}".format(datetime.datetime.now(), test_loss_avg))
+                  summary = sess.run(summary_op)
+                  test_summary_writer.add_summary(summary, global_step=tf.train.global_step(sess, global_step))
                   break
 
         # close tensorboard summary writer

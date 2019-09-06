@@ -21,9 +21,9 @@ tf.app.flags.DEFINE_string('data_dir','./data/evaluate',
     """Directory of evaluation data""")
 tf.app.flags.DEFINE_string('image_filename','img.nii.gz',
     """Image filename""")
-tf.app.flags.DEFINE_string('model_path','./tmp/ckpt/checkpoint-0.meta',
+tf.app.flags.DEFINE_string('model_path','./tmp/ckpt/checkpoint-2240.meta',
     """Path to saved models""")
-tf.app.flags.DEFINE_string('checkpoint_path','./tmp/ckpt/checkpoint-0',
+tf.app.flags.DEFINE_string('checkpoint_path','./tmp/ckpt/checkpoint-2240',
     """Directory of saved checkpoints""")
 tf.app.flags.DEFINE_integer('patch_size',128,
     """Size of a data patch""")
@@ -35,6 +35,31 @@ tf.app.flags.DEFINE_integer('stride_layer',32,
     """Stride size in layer direction""")
 tf.app.flags.DEFINE_integer('batch_size',1,
     """Setting batch size (currently only accept 1)""")
+
+def np_dice_coe(output, target, loss_type='jaccard', axis=[1, 2, 3], smooth=1e-5):
+    output = output[:,:,:,1]
+    target = target[:,:,:,1]
+    #axis = tuple(axis)
+    axis = (0,1,2)
+    inse = np.sum(output*target, axis=axis)
+
+    if loss_type == 'jaccard':
+        l = np.sum(output*output, axis=axis)
+        r = np.sum(target*target, axis=axis)
+    elif loss_type == 'sorensen':
+        l = np.sum(output, axis=axis)
+        r = np.sum(target, axis=axis)
+    else:
+        raise Exception("Unknown loss_type")
+    ## old axis=[0,1,2,3]
+    dice = 2 * (inse) / (l + r)
+    epsilon = 1e-5
+    dice = np.clip(dice, 0, 1.0-epsilon) # if all empty, dice = 1
+    ## new haodong
+    #dice = (tf.constant(2.0) * tf.cast(inse,dtype=tf.float32) + tf.constant(smooth)) / (tf.cast(l + r, dtype=tf.float32) + tf.constant(smooth))
+    ##
+    #dice = tf.reduce_mean(dice)
+    return dice
 
 def prepare_batch(image,ijk_patch_indices):
     image_batches = []
@@ -80,6 +105,7 @@ def evaluate():
 
             # check image data exists
             image_path = os.path.join(FLAGS.data_dir,case,FLAGS.image_filename)
+            true_label_path = os.path.join(FLAGS.data_dir,case,'label.nii.gz') #hack
 
             if not os.path.exists(image_path):
                 print("{}: Image file not found at {}".format(datetime.datetime.now(),image_path))
@@ -111,10 +137,16 @@ def evaluate():
 
                 sample = {'image': itkImages3d, 'label': label_tfm}
 
+                #hack
+                reader.SetFileName(true_label_path)
+                true_label = reader.Execute()
+                true_sample = {'image': [], 'label': true_label}
                 for transform in transforms:
                     sample = transform(sample)
+                    true_sample = transform(true_sample)
 
                 tfmItkImages3d, label_tfm = sample['image'], sample['label']
+                true_label_tfm = true_sample['label']
 
                 # create empty softmax image in pair with transformed image
                 softmax_tfm = sitk.Image(label_dims,sitk.sitkFloat32)
@@ -130,6 +162,8 @@ def evaluate():
 
                 label_np = sitk.GetArrayFromImage(label_tfm)
                 label_np = np.asarray(label_np,np.int32)
+                true_label_np = sitk.GetArrayFromImage(true_label_tfm)
+                true_label_np = np.asarray(true_label_np,np.int32)
 
                 softmax_np = sitk.GetArrayFromImage(softmax_tfm)
                 softmax_np = np.asarray(softmax_np,np.float32)
@@ -137,6 +171,7 @@ def evaluate():
                 # unify numpy and sitk orientation
                 image_np = np.transpose(image_np,(3,2,1,0)) # (T,Z,Y,X) -> (X,Y,Z,T) 
                 label_np = np.transpose(label_np,(2,1,0))
+                true_label_np = np.transpose(true_label_np,(2,1,0))
                 softmax_np = np.transpose(softmax_np,(2,1,0))
                 print('after transpose, image_np has shape ', image_np.shape)
                 print('after transpose, label_np has shape ', label_np.shape)
@@ -202,7 +237,18 @@ def evaluate():
                 print("{}: Evaluation complete".format(datetime.datetime.now()))
                 # eliminate overlapping region using the weighted value
                 label_np = np.rint(np.float32(label_np)/np.float32(weight_np) + 0.01)
-                softmax_np = softmax_np/np.float32(weight_np)
+                #softmax_np = softmax_np/np.float32(weight_np)
+                softmax_np = softmax_np/np.float16(weight_np)
+                
+                softmax_onehot = np.transpose(np.asarray([1-softmax_np,softmax_np],np.float32),(1,2,3,0))
+                true_label_onehot = np.eye(2)[true_label_np]
+                the_dice = np_dice_coe(softmax_onehot, true_label_onehot,loss_type='sorensen', axis=[0,1,2,3])
+                #true_dice = np_dice_coe(true_label_onehot, true_label_onehot,loss_type='sorensen', axis=[0,1,2,3])
+                #print('Dice score is %.3f, true label dice score is %.3f' % (the_dice,true_dice))
+
+                f_dice = open(os.path.join(FLAGS.data_dir,case,'dice.txt'), 'w')
+                f_dice.write("%.3f"%(the_dice))
+                f_dice.close()
 
                 # convert back to sitk space
                 label_np = np.transpose(label_np,(2,1,0))
