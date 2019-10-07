@@ -11,10 +11,18 @@ import math
 import datetime
 from tensorflow.python import debug as tf_debug
 import logging
-#logging.getLogger().setLevel(logging.INFO)
+import resource
+
+#logging.basicConfig(level=logging.DEBUG, format='%(asctime)s %(levelname)-8s %(message)s')
+console = logging.StreamHandler(sys.stdout)
+console.setLevel(logging.DEBUG)
+console.setFormatter(logging.Formatter('%(asctime)s %(levelname)-8s %(message)s'))
+vnet_logger = logging.getLogger('vnet_trainer')
+vnet_logger.addHandler(console)
+vnet_logger.setLevel(logging.DEBUG)
 
 # select gpu devices
-#os.environ["CUDA_VISIBLE_DEVICES"] = "0" # e.g. "0,1,2", "0,2" 
+os.environ["CUDA_VISIBLE_DEVICES"] = "0" # e.g. "0,1,2", "0,2" 
 
 # tensorflow app flags
 FLAGS = tf.app.flags.FLAGS
@@ -32,7 +40,11 @@ tf.app.flags.DEFINE_integer('batch_size',1,
     """Size of batch""")               
 tf.app.flags.DEFINE_integer('accum_batches',1,
     """Accumulate the gradient over this many batches before updating the gradient (1 = no accumulation)""")               
-tf.app.flags.DEFINE_integer('num_channels',4,
+tf.app.flags.DEFINE_integer('num_crops',1,
+    """Take this many crops from each image, per epoch""")               
+tf.app.flags.DEFINE_float('ccrop_sigma',2.5,
+    """Value of sigma to use for confidence crops""")               
+tf.app.flags.DEFINE_integer('num_channels',1,
     """Number of channels (MRI series)""")               
 tf.app.flags.DEFINE_integer('patch_size',128,
     """Size of a data patch""")
@@ -60,17 +72,20 @@ tf.app.flags.DEFINE_bool('restore_training',True,
     """Restore training from last checkpoint""")
 tf.app.flags.DEFINE_float('drop_ratio',0,
     """Probability to drop a cropped area if the label is empty. All empty patches will be dropped for 0 and accept all cropped patches if set to 1""")
-tf.app.flags.DEFINE_integer('min_pixel',500,
+tf.app.flags.DEFINE_integer('min_pixel',10,
     """Minimum non-zero pixels in the cropped label""")
-tf.app.flags.DEFINE_integer('shuffle_buffer_size',5,
+tf.app.flags.DEFINE_integer('shuffle_buffer_size',50,
     """Number of elements used in shuffle buffer""")
-tf.app.flags.DEFINE_string('loss_function','sorensen',
-    """Loss function used in optimization (xent, weight_xent, sorensen, jaccard)""")
+tf.app.flags.DEFINE_string('loss_function','dice',
+    """Loss function used in optimization (xent, weight_xent, dice, jaccard)""")
 tf.app.flags.DEFINE_string('optimizer','sgd',
     """Optimization method (sgd, adam, momentum, nesterov_momentum)""")
 tf.app.flags.DEFINE_float('momentum',0.5,
     """Momentum used in optimization""")
-
+tf.app.flags.DEFINE_boolean('is_batch_job',False,
+    """Disable some features if this is a batch job""")
+tf.app.flags.DEFINE_string('batch_job_name','',
+    """Name the batch job so the checkpoints and tensorboard output are identifiable.""")
 
 # tf.app.flags.DEFINE_float('class_weight',0.15,
 #     """The weight used for imbalanced classes data. Currently only apply on binary segmentation class (weight for 0th class, (1-weight) for 1st class)""")
@@ -107,7 +122,7 @@ def dice_coe(output, target, loss_type='jaccard', axis=[1, 2, 3], smooth=1e-5):
     target : Tensor
         The target distribution, format the same with `output`.
     loss_type : str
-        ``jaccard`` or ``sorensen``, default is ``jaccard``.
+        ``jaccard`` or ``dice``, default is ``jaccard``.
     axis : tuple of int
         All dimensions are reduced, default ``[1,2,3]``.
     smooth : float
@@ -131,7 +146,7 @@ def dice_coe(output, target, loss_type='jaccard', axis=[1, 2, 3], smooth=1e-5):
     if loss_type == 'jaccard':
         l = tf.reduce_sum(tf.multiply(output,output), axis=axis)
         r = tf.reduce_sum(tf.multiply(target,target), axis=axis)
-    elif loss_type == 'sorensen':
+    elif loss_type == 'dice':
         l = tf.reduce_sum(output, axis=axis)
         r = tf.reduce_sum(target, axis=axis)
     else:
@@ -170,41 +185,55 @@ def train():
         train_data_dir = os.path.join(FLAGS.data_dir,'training')
         test_data_dir = os.path.join(FLAGS.data_dir,'testing')
         # support multiple image input, but here only use single channel, label file should be a single file with different classes
+        
+        latest_filename = "checkpoint"
+        if FLAGS.is_batch_job and FLAGS.batch_job_name is not '':
+            latest_filename = latest_filename + "_" + FLAGS.batch_job_name
+            resource.setrlimit(resource.RLIMIT_CORE,(524288,-1))
+        latest_filename += "_latest"
 
         # Force input pipepline to CPU:0 to avoid operations sometimes ended up at GPU and resulting a slow down
         with tf.device('/cpu:0'):
             # create transformations to image and labels
+            trainTransforms = [
+                NiftiDataset.StatisticalNormalization(2.5),
+                NiftiDataset.ThresholdCrop(),
+                NiftiDataset.RandomRotation(),
+                NiftiDataset.ThresholdCrop(),
+                NiftiDataset.Padding((FLAGS.patch_size, FLAGS.patch_size, FLAGS.patch_layer)),
+                NiftiDataset.ConfidenceCrop((FLAGS.patch_size,FLAGS.patch_size,FLAGS.patch_layer), FLAGS.ccrop_sigma),
+                NiftiDataset.RandomNoise(),
+                # NiftiDataset.Normalization(),
+                #NiftiDataset.Resample((0.45,0.45,0.45)),
+                #NiftiDataset.RandomCrop((FLAGS.patch_size, FLAGS.patch_size, FLAGS.patch_layer),FLAGS.drop_ratio,FLAGS.min_pixel)
+                ]
             testTransforms = [
                 NiftiDataset.StatisticalNormalization(2.5),
+                NiftiDataset.ThresholdCrop(),
+                NiftiDataset.Padding((FLAGS.patch_size, FLAGS.patch_size, FLAGS.patch_layer)),
+                NiftiDataset.RandomCrop((FLAGS.patch_size, FLAGS.patch_size, FLAGS.patch_layer),0.5,10)
+                #NiftiDataset.ConfidenceCrop((FLAGS.patch_size,FLAGS.patch_size,FLAGS.patch_layer), 1.0),
                 # NiftiDataset.Normalization(),
                 #NiftiDataset.Resample((0.45,0.45,0.45)),
                 #NiftiDataset.Padding((FLAGS.patch_size, FLAGS.patch_size, FLAGS.patch_layer)),
-                NiftiDataset.RandomCrop((FLAGS.patch_size, FLAGS.patch_size, FLAGS.patch_layer),FLAGS.drop_ratio,FLAGS.min_pixel)
                 ]
-            trainTransforms = testTransforms + [NiftiDataset.RandomNoise()]
-            #trainTransforms = testTransforms + [NiftiDataset.RandomNoise()]
             
-            #trainTransforms = [
-            #    NiftiDataset.StatisticalNormalization(2.5),
-            #    # NiftiDataset.Normalization(),
-            #    NiftiDataset.Resample((0.45,0.45,0.45)),
-            #    NiftiDataset.Padding((FLAGS.patch_size, FLAGS.patch_size, FLAGS.patch_layer)),
-            #    NiftiDataset.RandomCrop((FLAGS.patch_size, FLAGS.patch_size, FLAGS.patch_layer),FLAGS.drop_ratio,FLAGS.min_pixel),
-            #    NiftiDataset.RandomNoise()
-            #    ]
-
             TrainDataset = NiftiDataset.NiftiDataset(
                 data_dir=train_data_dir,
                 image_filename=FLAGS.image_filename,
                 label_filename=FLAGS.label_filename,
                 transforms=trainTransforms,
+                num_crops=FLAGS.num_crops,
                 train=True
+                #peek_dir='data/peek_train'
                 )
             
             trainDataset = TrainDataset.get_dataset()
-            #trainDataset = trainDataset.shuffle(buffer_size=5)
+            # Here there are batches of size num_crops, unbatch and shuffle
+            trainDataset = trainDataset.apply(tf.contrib.data.unbatch())
+            trainDataset = trainDataset.shuffle(buffer_size=FLAGS.shuffle_buffer_size)
             trainDataset = trainDataset.batch(FLAGS.batch_size)
-            trainDataset = trainDataset.prefetch(buffer_size=FLAGS.batch_size)
+            trainDataset = trainDataset.prefetch(1)
             #trainDataset = trainDataset.apply(tf.contrib.data.prefetch_to_device('/gpu:0'))
 
             #testTransforms = [
@@ -220,13 +249,16 @@ def train():
                 image_filename=FLAGS.image_filename,
                 label_filename=FLAGS.label_filename,
                 transforms=testTransforms,
+                num_crops=10, #FLAGS.num_crops,
                 train=True
             )
 
             testDataset = TestDataset.get_dataset()
-            #testDataset = testDataset.shuffle(buffer_size=5)
+            # Here there are batches of size num_crops, unbatch and shuffle
+            testDataset = testDataset.apply(tf.contrib.data.unbatch())
+            testDataset = testDataset.shuffle(buffer_size=FLAGS.shuffle_buffer_size)
             testDataset = testDataset.batch(FLAGS.batch_size)
-            testDataset = testDataset.prefetch(buffer_size=FLAGS.batch_size)
+            testDataset = testDataset.prefetch(1)
             #testDataset = testDataset.apply(tf.contrib.data.prefetch_to_device('/gpu:0'))
             
         train_iterator = trainDataset.make_initializable_iterator()
@@ -327,7 +359,7 @@ def train():
 
         with tf.name_scope("weighted_cross_entropy"):
             #class_weights = tf.constant([1.0, 1.0])
-            class_weights = tf.constant([1.0, 50.0])
+            class_weights = tf.constant([1.0, 100.0])
 
             # deduce weights for batch samples based on their true label
             onehot_labels = tf.one_hot(tf.squeeze(labels_placeholder,squeeze_dims=[4]),depth = 2)
@@ -343,7 +375,7 @@ def train():
             # reduce the result to get your final loss
             weighted_loss_op = tf.reduce_mean(weighted_loss)
                 
-        #tf.summary.scalar('weighted_loss',weighted_loss_op)
+        #tf.summary.scalar('weighted_XE_loss',weighted_loss_op)
 
         # Argmax Op to generate label from logits
         with tf.name_scope("predicted_label"):
@@ -362,36 +394,42 @@ def train():
 
         # Dice Similarity, currently only for binary segmentation
         with tf.name_scope("dice"):
-            # sorensen = dice_coe(tf.expand_dims(softmax_op[:,:,:,:,1],-1),tf.cast(labels_placeholder,dtype=tf.float32), loss_type='sorensen')
+            # dice = dice_coe(tf.expand_dims(softmax_op[:,:,:,:,1],-1),tf.cast(labels_placeholder,dtype=tf.float32), loss_type='dice')
             # jaccard = dice_coe(tf.expand_dims(softmax_op[:,:,:,:,1],-1),tf.cast(labels_placeholder,dtype=tf.float32), loss_type='jaccard')
             
             # This is commented out because using all of the True-Negative pixels gives a very deceptive dice score
-            # sorensen = dice_coe(softmax_op,tf.cast(tf.one_hot(labels_placeholder[:,:,:,:,0],depth=2),dtype=tf.float32), loss_type='sorensen', axis=[1,2,3,4])
+            # dice = dice_coe(softmax_op,tf.cast(tf.one_hot(labels_placeholder[:,:,:,:,0],depth=2),dtype=tf.float32), loss_type='dice', axis=[1,2,3,4])
             # jaccard = dice_coe(softmax_op,tf.cast(tf.one_hot(labels_placeholder[:,:,:,:,0],depth=2),dtype=tf.float32), loss_type='jaccard', axis=[1,2,3,4])
             
             # Computing the dice using only the second row of the 2-entry softmax vector seems more useful
-            sorensen = dice_coe(softmax_op[:,:,:,:,1],tf.cast(labels_placeholder[:,:,:,:,0],dtype=tf.float32), loss_type='sorensen', axis=[1,2,3])
+            dice = dice_coe(softmax_op[:,:,:,:,1],tf.cast(labels_placeholder[:,:,:,:,0],dtype=tf.float32), loss_type='dice', axis=[1,2,3])
             jaccard  = dice_coe(softmax_op[:,:,:,:,1],tf.cast(labels_placeholder[:,:,:,:,0],dtype=tf.float32), loss_type='jaccard', axis=[1,2,3])
-            sorensen_loss = 1. - sorensen
+            dice_loss = 1. - dice
             jaccard_loss = 1. - jaccard
             
-            sorensen_sum  = tf.get_variable("sorensen_sum" , dtype=tf.float32, trainable=False, initializer=tf.constant(0.))
+            wce_sum  = tf.get_variable("wce_sum" , dtype=tf.float32, trainable=False, initializer=tf.constant(0.))
+            wce2_sum = tf.get_variable("wce2_sum", dtype=tf.float32, trainable=False, initializer=tf.constant(0.))
+            dice_sum  = tf.get_variable("dice_sum" , dtype=tf.float32, trainable=False, initializer=tf.constant(0.))
+            dice2_sum = tf.get_variable("dice2_sum", dtype=tf.float32, trainable=False, initializer=tf.constant(0.))
             jaccard_sum   = tf.get_variable("jaccard_sum"  , dtype=tf.float32, trainable=False, initializer=tf.constant(0.))
-            sorensen2_sum = tf.get_variable("sorensen2_sum", dtype=tf.float32, trainable=False, initializer=tf.constant(0.))
             jaccard2_sum  = tf.get_variable("jaccard2_sum" , dtype=tf.float32, trainable=False, initializer=tf.constant(0.))
             # Number of accumulated batches
             n_ab = tf.get_variable("n_ab", dtype=tf.float32, trainable=False, use_resource=True, initializer=tf.constant(0.))
-            sorensen_avg = tf.cond(n_ab > 1., lambda: sorensen_sum/n_ab, lambda: tf.constant(0.)) 
+            wce_avg = tf.cond(n_ab > 1., lambda: wce_sum/n_ab, lambda: tf.constant(0.)) 
+            wce_stdev = tf.cond(n_ab > 1., lambda: tf.math.sqrt( (n_ab*wce2_sum - wce_sum*wce_sum) / (n_ab * (n_ab-1.))), lambda: tf.constant(0.))
+            dice_avg = tf.cond(n_ab > 1., lambda: dice_sum/n_ab, lambda: tf.constant(0.)) 
+            dice_stdev = tf.cond(n_ab > 1., lambda: tf.math.sqrt( (n_ab*dice2_sum - dice_sum*dice_sum) / (n_ab * (n_ab-1.))), lambda: tf.constant(0.))
+            dice_loss_avg = 1. - dice_avg
             jaccard_avg  = tf.cond(n_ab > 1., lambda: jaccard_sum /n_ab, lambda: tf.constant(0.)) 
-            sorensen_stdev = tf.cond(n_ab > 1., lambda: tf.math.sqrt( (n_ab*sorensen2_sum - sorensen_sum*sorensen_sum) / (n_ab * (n_ab-1.))), lambda: tf.constant(0.))
             jaccard_stdev  = tf.cond(n_ab > 1., lambda: tf.math.sqrt( (n_ab*jaccard2_sum  - jaccard_sum*jaccard_sum  ) / (n_ab * (n_ab-1.))), lambda: tf.constant(0.))
-            sorensen_loss_avg = 1. - sorensen_avg
             jaccard_loss_avg = 1. - jaccard_avg
-        tf.summary.scalar('sorensen_avg', sorensen_avg)
+        tf.summary.scalar('wce_avg', wce_avg)
+        tf.summary.scalar('wce_stdev', wce_stdev)
+        tf.summary.scalar('dice_avg', dice_avg)
+        tf.summary.scalar('dice_stdev', dice_stdev)
+        tf.summary.scalar('dice_loss_avg', dice_loss_avg)
         tf.summary.scalar('jaccard_avg', jaccard_avg)
-        tf.summary.scalar('sorensen_stdev', sorensen_stdev)
         tf.summary.scalar('jaccard_stdev', jaccard_stdev)
-        tf.summary.scalar('sorensen_loss_avg', sorensen_loss_avg)
         tf.summary.scalar('jaccard_loss_avg',jaccard_loss_avg)
 
         # Training Op
@@ -413,8 +451,8 @@ def train():
                 loss_fn = loss_op
             elif(FLAGS.loss_function == "weight_xent"):
                 loss_fn = weighted_loss_op
-            elif(FLAGS.loss_function == "sorensen"):
-                loss_fn = sorensen_loss
+            elif(FLAGS.loss_function == "dice"):
+                loss_fn = dice_loss
             elif(FLAGS.loss_function == "jaccard"):
                 loss_fn = jaccard_loss
             else:
@@ -443,16 +481,20 @@ def train():
         with tf.name_scope("avgloss"):
             # Here we accumulate the average loss and square of loss across the accum. batches
             sum_zero_op = []
-            sum_zero_op += [sorensen_sum.assign(tf.zeros_like(sorensen_sum))]
-            sum_zero_op += [jaccard_sum.assign(tf.zeros_like(jaccard_sum))]
-            sum_zero_op += [sorensen2_sum.assign(tf.zeros_like(sorensen2_sum))]
-            sum_zero_op += [jaccard2_sum.assign(tf.zeros_like(jaccard2_sum))]
             sum_zero_op += [n_ab.assign(tf.zeros_like(n_ab))]
+            sum_zero_op += [wce_sum.assign(tf.zeros_like(wce_sum))]
+            sum_zero_op += [wce2_sum.assign(tf.zeros_like(wce2_sum))]
+            sum_zero_op += [dice_sum.assign(tf.zeros_like(dice_sum))]
+            sum_zero_op += [dice2_sum.assign(tf.zeros_like(dice2_sum))]
+            sum_zero_op += [jaccard_sum.assign(tf.zeros_like(jaccard_sum))]
+            sum_zero_op += [jaccard2_sum.assign(tf.zeros_like(jaccard2_sum))]
 
             sum_accum_op = []
-            sum_accum_op += [sorensen_sum.assign_add(sorensen)]
+            sum_accum_op += [wce_sum.assign_add(weighted_loss_op)]
+            sum_accum_op += [wce2_sum.assign_add(weighted_loss_op*weighted_loss_op)]
+            sum_accum_op += [dice_sum.assign_add(dice)]
+            sum_accum_op += [dice2_sum.assign_add(dice*dice)]
             sum_accum_op += [jaccard_sum.assign_add(jaccard)]
-            sum_accum_op += [sorensen2_sum.assign_add(sorensen*sorensen)]
             sum_accum_op += [jaccard2_sum.assign_add(jaccard*jaccard)]
             sum_accum_op += [n_ab.assign_add(1.)]
 
@@ -462,9 +504,12 @@ def train():
 
         # saver
         summary_op = tf.summary.merge_all()
-        checkpoint_prefix = os.path.join(FLAGS.checkpoint_dir ,"checkpoint")
+        checkpoint_slug = "checkpoint"
+        if FLAGS.is_batch_job and FLAGS.batch_job_name is not '':
+          checkpoint_slug = checkpoint_slug + "_" + FLAGS.batch_job_name
+        checkpoint_prefix = os.path.join(FLAGS.checkpoint_dir, checkpoint_slug)
         print("Setting up Saver...")
-        saver = tf.train.Saver(keep_checkpoint_every_n_hours=5)
+        saver = tf.train.Saver(keep_checkpoint_every_n_hours=10000,max_to_keep=3)
 
         config = tf.ConfigProto()
         config.gpu_options.allow_growth = True
@@ -473,20 +518,34 @@ def train():
         # training cycle
         with tf.Session(config=config) as sess:
             #sess = tf_debug.LocalCLIDebugWrapperSession(sess)
+            #sess.add_tensor_filter("has_inf_or_nan", tf_debug.has_inf_or_nan)
             # Initialize all variables
             sess.run(tf.global_variables_initializer())
             print("{}: Start training...".format(datetime.datetime.now()))
 
             # summary writer for tensorboard
-            train_summary_writer = tf.summary.FileWriter(FLAGS.log_dir + '/train', sess.graph)
-            test_summary_writer = tf.summary.FileWriter(FLAGS.log_dir + '/test', sess.graph)
+            #train_summary_writer = tf.summary.FileWriter(FLAGS.log_dir + '/train', sess.graph)
+            #test_summary_writer = tf.summary.FileWriter(FLAGS.log_dir + '/test', sess.graph)
+            train_log_dir = FLAGS.log_dir + '/train'
+            test_log_dir = FLAGS.log_dir + '/test'
+            if FLAGS.is_batch_job and FLAGS.batch_job_name is not '':
+              train_log_dir = train_log_dir + "_" + FLAGS.batch_job_name
+              test_log_dir = test_log_dir + "_" + FLAGS.batch_job_name
+            train_summary_writer = tf.summary.FileWriter(train_log_dir)
+            test_summary_writer = tf.summary.FileWriter(test_log_dir)
+            
+            if not FLAGS.is_batch_job:
+                train_summary_writer.add_graph(sess.graph)
+                test_summary_writer.add_graph(sess.graph)
 
+            # number of crops for gradient accumulation 
+            n_accum_crops = FLAGS.num_crops * FLAGS.accum_batches # number of crops for gradient accumulation 
             # restore from checkpoint
             if FLAGS.restore_training:
                 # check if checkpoint exists
-                if os.path.exists(checkpoint_prefix+"-latest"):
+                if os.path.exists(checkpoint_prefix+"_latest"):
                     print("{}: Last checkpoint found at {}, loading...".format(datetime.datetime.now(),FLAGS.checkpoint_dir))
-                    latest_checkpoint_path = tf.train.latest_checkpoint(FLAGS.checkpoint_dir,latest_filename="checkpoint-latest")
+                    latest_checkpoint_path = tf.train.latest_checkpoint(FLAGS.checkpoint_dir,latest_filename=latest_filename)
                     saver.restore(sess, latest_checkpoint_path)
             
             print("{}: Last checkpoint epoch: {}".format(datetime.datetime.now(),start_epoch.eval()[0]))
@@ -497,46 +556,55 @@ def train():
               # initialize iterator in each new epoch
               sess.run(train_iterator.initializer)
               sess.run(test_iterator.initializer)
-              print("{}: Epoch {} starts".format(datetime.datetime.now(),epoch+1))
+              vnet_logger.info("Epoch %d starts"%(epoch+1))
 
               # training phase
               train_loss_avg = 0.0
               n_train = 0
               model.is_training = True;
-              while True:
+              vnet_logger.debug('Beginning accumulation batch')
+              while True: # Beginning of Accumulation batch
                 try:
+                  vnet_logger.debug('Zeroing gradients and loss sums')
                   sess.run(zero_op) # reset gradient accumulation
                   sess.run(sum_zero_op) # reset loss-averaging
-                  n_batches = FLAGS.accum_batches # number of batches for gradient accumulation 
-                  for i in range(n_batches):
+                  vnet_logger.debug('Beginning loop over the accumulation crops')
+                  for i in range(n_accum_crops):
                     [image, label] = sess.run(next_element_train)
                     image = image[:,:,:,:,:] #image[:,:,:,:,np.newaxis]
                     label = label[:,:,:,:,np.newaxis]
                     train, train_loss, sum_accum = sess.run([accum_op, loss_fn, sum_accum_op], feed_dict={images_placeholder: image, labels_placeholder: label})
-                    # This is redundant, remove this when we can get the average loss for all options
+                    # This is redundant, remove this when we can get the average loss for all supported loss functions
                     train_loss_avg += train_loss
                     n_train += 1
+                  vnet_logger.info("Applying gradients, n_train=%d"%n_train)
                   sess.run(apply_gradients_op)
+                  vnet_logger.debug('Applying summary op')
                   summary = sess.run(summary_op)
                   train_summary_writer.add_summary(summary, global_step=tf.train.global_step(sess, global_step))
                 except tf.errors.OutOfRangeError:
-                  # Compute the accumulated gradient even if we didn't run over a full set of n_batches. Should we really do this?
-                  sess.run(apply_gradients_op)
-                  summary = sess.run(summary_op)
-                  train_summary_writer.add_summary(summary, global_step=tf.train.global_step(sess, global_step))
+                  # We could compute the accumulated gradient even if we didn't run over a full set of n_batches
+                  # This can explode the gradients, especially if i=0 at the time of this exception
+                  # I don't think we should really do this?
+                  if n_train % (n_accum_crops) != 0:
+                    print("Applying gradients, n_train=%d"%n_train)
+                    sess.run(apply_gradients_op)
+                    summary = sess.run(summary_op)
+                    train_summary_writer.add_summary(summary, global_step=tf.train.global_step(sess, global_step))
+                  
                   # Compute the average training loss across all batches in the epoch.
-                  # This is now redundant, get the value in the call to sess.run
                   train_loss_avg = train_loss_avg / n_train
-                  print("{0}: Average training loss is {1:.3f}".format(datetime.datetime.now(), train_loss_avg))
+                  print("{0}: Average training loss is {1:.3f} over {2:d}".format(datetime.datetime.now(), train_loss_avg, n_train))
                   start_epoch_inc.op.run()
                   # print(start_epoch.eval())
                   # save the model at end of each epoch training
                   print("{}: Saving checkpoint of epoch {} at {}...".format(datetime.datetime.now(),epoch+1,FLAGS.checkpoint_dir))
                   if not (os.path.exists(FLAGS.checkpoint_dir)):
                       os.makedirs(FLAGS.checkpoint_dir,exist_ok=True)
+
                   saver.save(sess, checkpoint_prefix, 
                       global_step=tf.train.global_step(sess, global_step),
-                      latest_filename="checkpoint-latest")
+                      latest_filename=latest_filename)
                   print("{}: Saving checkpoint succeed".format(datetime.datetime.now()))
                   break
               
@@ -560,7 +628,7 @@ def train():
 
                 except tf.errors.OutOfRangeError:
                   test_loss_avg = test_loss_avg / n_test
-                  print("{0}: Average testing loss is {1:.3f}".format(datetime.datetime.now(), test_loss_avg))
+                  print("{0}: Average testing loss is {1:.3f} over {2:d}".format(datetime.datetime.now(), test_loss_avg, n_test))
                   summary = sess.run(summary_op)
                   test_summary_writer.add_summary(summary, global_step=tf.train.global_step(sess, global_step))
                   break
@@ -570,16 +638,16 @@ def train():
         test_summary_writer.close()
 
 def main(argv=None):
-    if not FLAGS.restore_training:
+    #if not FLAGS.restore_training:
         # clear log directory
-        if tf.gfile.Exists(FLAGS.log_dir):
-            tf.gfile.DeleteRecursively(FLAGS.log_dir)
-        tf.gfile.MakeDirs(FLAGS.log_dir)
+        #if tf.gfile.Exists(FLAGS.log_dir):
+        #    tf.gfile.DeleteRecursively(FLAGS.log_dir)
+        #tf.gfile.MakeDirs(FLAGS.log_dir)
 
         # clear checkpoint directory
-        if tf.gfile.Exists(FLAGS.checkpoint_dir):
-            tf.gfile.DeleteRecursively(FLAGS.checkpoint_dir)
-        tf.gfile.MakeDirs(FLAGS.checkpoint_dir)
+        #if tf.gfile.Exists(FLAGS.checkpoint_dir):
+        #    tf.gfile.DeleteRecursively(FLAGS.checkpoint_dir)
+        #tf.gfile.MakeDirs(FLAGS.checkpoint_dir)
 
         # # clear model directory
         # if tf.gfile.Exists(FLAGS.model_dir):

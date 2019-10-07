@@ -82,6 +82,10 @@ def evaluate():
     tf.reset_default_graph()
     imported_meta = tf.train.import_meta_graph(FLAGS.model_path)
 
+    input_batch_shape = (FLAGS.batch_size, FLAGS.patch_size, FLAGS.patch_size, FLAGS.patch_layer, 1) #FLAGS.num_channels) 
+    output_batch_shape = (FLAGS.batch_size, FLAGS.patch_size, FLAGS.patch_size, FLAGS.patch_layer, 1) # 1 for binary classification
+    images_placeholder_eval = tf.placeholder(tf.float32, shape=input_batch_shape, name="images_placeholder")
+    labels_placeholder_eval = tf.placeholder(tf.int32, shape=output_batch_shape, name="labels_placeholder")   
     # create transformations to image and labels
     transforms = [
         # NiftiDataset.Normalization(),
@@ -122,10 +126,14 @@ def evaluate():
                 image_np = sitk.GetArrayFromImage(image)
                 itkImages3d = []
                 # Weird NIFTI convention: Dimension 3 is the index!
-                for i in range(image_np.shape[3]): 
-                  volume = image_np[:,:,:,i]
-                  itkImage3d = sitk.GetImageFromArray(volume)
+                if len(image_np.shape) == 3:
+                  itkImage3d = sitk.GetImageFromArray(image_np)
                   itkImages3d += [itkImage3d]
+                else:
+                  for i in range(image_np.shape[3]): 
+                    volume = image_np[:,:,:,i]
+                    itkImage3d = sitk.GetImageFromArray(volume)
+                    itkImages3d += [itkImage3d]
                
                 # create empty label in pair with transformed image
                 label_dims = image.GetSize()
@@ -223,7 +231,7 @@ def evaluate():
                 # acutal segmentation
                 for i in tqdm(range(len(batches))):
                     batch = batches[i]
-                    [pred, softmax] = sess.run(['predicted_label/prediction:0','softmax/softmax:0'], feed_dict={'images_placeholder:0': batch})
+                    [pred, softmax] = sess.run(['predicted_label/prediction:0','softmax/softmax:0'], feed_dict={images_placeholder_eval: batch})
                     istart = ijk_patch_indices[i][0][0]
                     iend = ijk_patch_indices[i][0][1]
                     jstart = ijk_patch_indices[i][0][2]

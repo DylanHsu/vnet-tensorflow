@@ -14,7 +14,10 @@ class NiftiDataset(object):
     image_filename (string): Filename of image data.
     label_filename (string): Filename of label data.
     transforms (list): List of SimpleITK image transformations.
+    num_crops: Number of random crops to serve per image per epoch
     train (bool): Determine whether the dataset class run in training/inference mode. When set to false, an empty label with same metadata as image is generated.
+    peek_dir (string): Place to write images after the transforms for debugging.
+
   """
 
   def __init__(self,
@@ -22,7 +25,9 @@ class NiftiDataset(object):
     image_filename = '',
     label_filename = '',
     transforms=None,
-    train=False):
+    num_crops=1,
+    train=False,
+    peek_dir = ''):
 
     # Init membership variables
     self.data_dir = data_dir
@@ -30,19 +35,21 @@ class NiftiDataset(object):
     self.label_filename = label_filename
     self.transforms = transforms
     self.train = train
-
+    self.num_crops = num_crops
+    self.peek_dir = peek_dir
   def get_dataset(self):
     image_paths = []
     label_paths = []
-    for case in os.listdir(self.data_dir):
+    cases = os.listdir(self.data_dir)
+    for case in cases:
       image_paths.append(os.path.join(self.data_dir,case,self.image_filename))
       label_paths.append(os.path.join(self.data_dir,case,self.label_filename))
 
     dataset = tf.data.Dataset.from_tensor_slices((image_paths,label_paths))
 
-    dataset = dataset.shuffle(buffer_size=5)
+    dataset = dataset.shuffle(buffer_size=len(cases))
     dataset = dataset.map(lambda image_path, label_path: tuple(tf.py_func(
-      self.input_parser, [image_path, label_path], [tf.float32,tf.int32])))
+      self.input_parser, [image_path, label_path], [tf.float32,tf.int32])), num_parallel_calls=4)
 
     self.dataset = dataset
     self.data_size = len(image_paths)
@@ -51,9 +58,7 @@ class NiftiDataset(object):
   def read_image(self,path):
     reader = sitk.ImageFileReader()
     reader.SetFileName(path)
-    #print('DEBUG: reading from "', path, '"')
     image = reader.Execute()
-    #print('DEBUG: done reading from "', path, '"')
     return image
 
   def input_parser(self,image_path, label_path):
@@ -75,41 +80,80 @@ class NiftiDataset(object):
     # Workaround: convert to 4D Numpy then back to 3D SimpleITK images
     # This will have length N, where N is the number of (MRI) series
     image_np = sitk.GetArrayFromImage(image)
-    #print('DEBUG: after GetArrayFromImage, image_np has dims ', image_np.shape)
     itkImages3d = []
     if len(image_np.shape) == 3:
-      itkImages3d = [image_np]
+      itkImage3d = sitk.GetImageFromArray(image_np)
+      itkImage3d.SetOrigin(image.GetOrigin())
+      itkImage3d.SetSpacing(image.GetSpacing())
+      itkImage3d.SetDirection(image.GetDirection())
+      itkImage3d = castImageFilter.Execute(itkImage3d)
+      itkImages3d += [itkImage3d]
+      #itkImages3d = [image_np]
     else:
       # Weird NIFTI convention: Dimension 3 is the index!
       for i in range(image_np.shape[3]): 
         volume = image_np[:,:,:,i]
         itkImage3d = sitk.GetImageFromArray(volume)
+        itkImage3d.SetOrigin(image.GetOrigin())
+        itkImage3d.SetSpacing(image.GetSpacing())
+        itkImage3d.SetDirection(image.GetDirection())
         itkImage3d = castImageFilter.Execute(itkImage3d)
         itkImages3d += [itkImage3d]
     # Form the sample dict with the list of 3D ITK Images and the label
     sample = {'image': itkImages3d, 'label':label}
-    #print('DEBUG: done forming sample dict')
-    if self.transforms:
-      for transform in self.transforms:
-        #print('DEBUG: running transform of object type', transform)
-        sample = transform(sample)
-    #print('DEBUG: done transforming')
     
-    # convert sample to tf tensors
-    image_np = [] # New size of image_np, inferred from the transformed shape
-    for volume in sample['image']:
-      image_np += [sitk.GetArrayFromImage(volume)]
-    image_np = np.asarray(image_np,np.float32)
-    
-    label_np = sitk.GetArrayFromImage(sample['label'])
-    label_np = np.asarray(label_np,np.int32)
+    if self.peek_dir != '':
+      case_name = os.path.basename(os.path.dirname(image_path)) # for peeking
+      peek_case_folder = os.path.join(os.fsencode(self.peek_dir), case_name)
+      try:
+        os.mkdir(peek_case_folder)
+      except:
+        pass
+      writer = sitk.ImageFileWriter()
+      writer.UseCompressionOn()
+   
+    images_np=[]
+    labels_np=[]
+    for multiple_crops in range(0,self.num_crops):
+      sample_tfm = sample
+      if self.transforms:
+        for transform in self.transforms:
+          sample_tfm = transform(sample_tfm)
+      
+      # If we are peeking, write the images to the directory
+      if self.peek_dir != '':
+        i=0
+        for volume in sample_tfm['image']:
+          
+          writer.SetFileName(os.fsdecode(os.path.join(peek_case_folder,os.fsencode('img_%d_crop%d.nii.gz'%(i,multiple_crops)))))
+          writer.Execute(volume)
+          i+=1
+        writer.SetFileName(os.fsdecode(os.path.join(peek_case_folder,os.fsencode('label_crop%d.nii.gz'%(multiple_crops)))))
+        castImageFilter.SetOutputPixelType(sitk.sitkInt16)
+        labelInt16 = castImageFilter.Execute(sample_tfm['label'])
+        labelInt16.CopyInformation(sample_tfm['image'][0])
+        writer.Execute(labelInt16)
 
-    # to unify matrix dimension order between SimpleITK([x,y,z]) and numpy([z,y,x])
-    image_np = np.transpose(image_np,(3,2,1,0)) # (T,Z,Y,X) -> (X,Y,Z,T) 
-    label_np = np.transpose(label_np,(2,1,0))
+      # convert sample to tf tensors
+      image_np = [] # New size of image_np, inferred from the transformed shape
+      for volume in sample_tfm['image']:
+        image_np += [sitk.GetArrayFromImage(volume)]
+      image_np = np.asarray(image_np,np.float32)
+      
+      label_np = sitk.GetArrayFromImage(sample_tfm['label'])
+      label_np = np.asarray(label_np,np.int32)
 
-    #print('DEBUG: done tensorifying')
-    return image_np, label_np
+      # to unify matrix dimension order between SimpleITK([x,y,z]) and numpy([z,y,x])
+      image_np = np.transpose(image_np,(3,2,1,0)) # (T,Z,Y,X) -> (X,Y,Z,T) 
+      label_np = np.transpose(label_np,(2,1,0))
+      #return image_np, label_np
+
+      images_np.append(image_np)
+      labels_np.append(label_np)
+      #print('DEBUG: serving crop %d, with %d true voxels'%(multiple_crops,np.sum(label_np)))
+    image_stack = np.stack(images_np)
+    label_stack = np.stack(labels_np)
+    return image_stack, label_stack
 
 class Normalization(object):
   """
@@ -143,19 +187,18 @@ class StatisticalNormalization(object):
   def __call__(self, sample):
     image, label = sample['image'], sample['label']
     statisticsFilter = sitk.StatisticsImageFilter()
-    for volume in image:
-      statisticsFilter.Execute(volume) # This returns None type
-
+    normalizedImage = image
     intensityWindowingFilter = sitk.IntensityWindowingImageFilter()
     intensityWindowingFilter.SetOutputMaximum(255)
     intensityWindowingFilter.SetOutputMinimum(0)
-    intensityWindowingFilter.SetWindowMaximum(statisticsFilter.GetMean()+self.sigma*statisticsFilter.GetSigma());
-    intensityWindowingFilter.SetWindowMinimum(statisticsFilter.GetMean()-self.sigma*statisticsFilter.GetSigma());
+    for i,volume in enumerate(image):
+      statisticsFilter.Execute(volume) # This returns None type
 
-    # Hack
-    image[:] = [intensityWindowingFilter.Execute(volume) for volume in image]
+      intensityWindowingFilter.SetWindowMaximum(statisticsFilter.GetMean()+self.sigma*statisticsFilter.GetSigma());
+      intensityWindowingFilter.SetWindowMinimum(statisticsFilter.GetMean()-self.sigma*statisticsFilter.GetSigma());
+      normalizedImage[i] = intensityWindowingFilter.Execute(volume)
 
-    return {'image': image, 'label': label}
+    return {'image': normalizedImage, 'label': label}
 
 class ManualNormalization(object):
   """
@@ -337,7 +380,7 @@ class RandomCrop(object):
     output_size (tuple or int): Desired output size. If int, cubic crop is made.
   """
 
-  def __init__(self, output_size, drop_ratio=0.1, min_pixel=1):
+  def __init__(self, output_size, drop_ratio=0.1, min_pixel=1, num_crops=1):
     self.name = 'Random Crop'
 
     assert isinstance(output_size, (int, tuple))
@@ -362,7 +405,6 @@ class RandomCrop(object):
   def __call__(self,sample):
     image, label = sample['image'], sample['label']
     size_old = image[0].GetSize()
-    #print('DEBUG: size_old for cropping is ', size_old)
     size_new = self.output_size
 
     contain_label = False
@@ -372,8 +414,11 @@ class RandomCrop(object):
 
     # statFilter = sitk.StatisticsImageFilter()
     # statFilter.Execute(label)
-    # print(statFilter.GetMaximum(), statFilter.GetSum())
-
+    
+    # Calculate this boolean for the image, not for the crop
+    # That way, drop_ratio is the fraction of images for which we get an empty crop,
+    # not the fraction of crops
+    keep_empty = self.drop(self.drop_ratio)
     while not contain_label: 
       # get the start crop coordinate in ijk
       if size_old[0] <= size_new[0]:
@@ -400,9 +445,11 @@ class RandomCrop(object):
       # will iterate until a sub volume containing label is extracted
       # pixel_count = seg_crop.GetHeight()*seg_crop.GetWidth()*seg_crop.GetDepth()
       # if statFilter.GetSum()/pixel_count<self.min_ratio:
-      if statFilter.GetSum()<self.min_pixel:
-        contain_label = self.drop(self.drop_ratio) # has some probabilty to contain patch with empty label
-      else:
+      #if statFilter.GetSum()>self.min_pixel:
+      #  contain_label = keep_self.drop(self.drop_ratio) # has some probabilty to contain patch with empty label
+      #else:
+      #  contain_label = True
+      if statFilter.GetSum()>self.min_pixel or keep_empty is True:
         contain_label = True
 
     image_crop = [roiFilter.Execute(volume) for volume in image]
@@ -516,7 +563,8 @@ class ConfidenceCrop(object):
     return {'image': croppedImage, 'label': croppedLabel}
 
   def NormalOffset(self,size, sigma):
-    s = np.random.normal(0, size*sigma/2, 100) # 100 sample is good enough
+    #s = np.random.normal(0, size*sigma/2, 100) # 100 sample is good enough
+    s = np.random.normal(0, size*sigma/2, 1000) 
     return int(round(random.choice(s)))
 
 class BSplineDeformation(object):
@@ -562,3 +610,107 @@ class BSplineDeformation(object):
   def NormalOffset(self,size, sigma):
     s = np.random.normal(0, size*sigma/2, 100) # 100 sample is good enough
     return int(round(random.choice(s)))
+
+class RandomRotation(object):
+  """
+  Rotate an image by a random amount
+  """
+
+  def __init__(self, interpolator=sitk.sitkBSpline):
+    self.name = 'RandomRotation'
+    self.interpolator = interpolator
+
+  def __call__(self, sample):
+    image, label = sample['image'], sample['label']
+   
+    ## choose label as centroid
+    #ccFilter = sitk.ConnectedComponentImageFilter()
+    #labelCC = ccFilter.Execute(label)
+    #labelShapeFilter = sitk.LabelShapeStatisticsImageFilter()
+    #labelShapeFilter.Execute(labelCC)
+    #
+    #if labelShapeFilter.GetNumberOfLabels() == 0:
+    #  # handle image without label
+    #  selectedLabel = 0
+    #  centroid = (int(size_new[0]/2), int(size_new[1]/2), int(size_new[2]/2))
+    #else:
+    #  # randomly select of the label's centroid
+    #  selectedLabel = random.randint(1,labelShapeFilter.GetNumberOfLabels())
+    #  centroidPP = labelShapeFilter.GetCentroid(selectedLabel)
+    #  centroid = label.TransformPhysicalPointToIndex(centroidPP)
+    rot_center = image[0].TransformIndexToPhysicalPoint((image[0].GetSize()[0]//2, image[0].GetSize()[1]//2,image[0].GetSize()[2]//2))
+    
+    # Generate a random rotation direction on the unit sphere
+    phi = np.random.uniform(0,np.pi*2)
+    costheta = np.random.uniform(-1,1)
+    theta = np.arccos( costheta )
+    x = np.sin( theta) * np.cos( phi )
+    y = np.sin( theta) * np.sin( phi )
+    z = np.cos( theta )
+    alpha = np.random.uniform(0, np.pi*2) # amount to rotate by
+    rotation = sitk.VersorTransform((x,y,z), alpha)
+    rotation.SetCenter(rot_center)
+    
+    # Define reference image which is larger than the input image
+    # This is necessary so we don't rotate the true label out of bounds!
+    # An SxSxS image with a random rotation will always fit in a box of size S*sqrt(2)
+    # Assume there is some uninteresting stuff at the edge of the image.
+    # We could rotate around a chosen label centroid, and throw out some information,
+    # This is more conservative in terms of retaining information but is maybe more memory intensive.
+    resampler = sitk.ResampleImageFilter()
+    # Perform the interpolation
+    image_size = image[0].GetSize()
+    reference_size = tuple([math.ceil(i*1.2) for i in list(image_size)])
+    resampler.SetOutputSpacing(image[0].GetSpacing())
+    resampler.SetSize(reference_size)
+    resampler.SetInterpolator(sitk.sitkLinear)
+    resampler.SetOutputOrigin(image[0].GetOrigin())
+    resampler.SetOutputDirection(image[0].GetDirection())
+    reference = resampler.Execute(image[0])
+    reference = image[0]
+
+    image[:] = [sitk.Resample(volume, reference, rotation, self.interpolator, 0) for volume in image]
+    # Label interpolation must be nearest neighbor
+    label = sitk.Resample(label, reference, rotation, sitk.sitkNearestNeighbor, 0)
+    return {'image': image, 'label': label}
+
+class ThresholdCrop(object):
+  """
+  Use Otsu's threshold estimator to separate background and foreground. In medical imaging the background is
+  usually air. Then crop the image using the foreground's axis aligned bounding box.
+  Assume the anatomy and background intensities form a bi-modal distribution (Otsu's method)
+  """
+  def __init__(self, inside_value=0, outside_value=255):
+    self.name = 'ThresholdCrop'
+    self.inside_value = inside_value
+    self.outside_value = outside_value
+
+  def __call__(self, sample):
+    image, label = sample['image'], sample['label']
+    # Build a composite image from the slices and the label
+    # The bounding box must contain the average of the image slices and the label
+    # alternative: could require it contain the sum of the slices
+    composite_image = image[0]
+    aif = sitk.AddImageFilter()
+    if len(image) > 1:
+      for i in range(1,len(image)):
+        composite_image = aif.Execute(composite_image, image[i])
+      dif = sitk.DivideImageFilter()
+      # Here we are taking the average, comment out to take the sum
+      composite_image = dif.Execute(composite_image, len(image))
+
+    castImageFilter = sitk.CastImageFilter()
+    castImageFilter.SetOutputPixelType(sitk.sitkInt16)
+    composite_image = aif.Execute(composite_image, castImageFilter.Execute(label))
+        
+    # Set pixels that are in [min_intensity,otsu_threshold] to inside_value, values above otsu_threshold are
+    # set to outside_value. The anatomy has higher intensity values than the background, so it is outside.
+    label_shape_filter = sitk.LabelShapeStatisticsImageFilter()
+    label_shape_filter.Execute( sitk.OtsuThreshold(composite_image, self.inside_value, self.outside_value) )
+    bounding_box = label_shape_filter.GetBoundingBox(self.outside_value)
+    # The bounding box's first "dim" entries are the starting index and last "dim" entries the size
+   
+    croppedImage = [sitk.RegionOfInterest(volume, bounding_box[int(len(bounding_box)/2):], bounding_box[0:int(len(bounding_box)/2)]) for volume in image]
+    croppedLabel = sitk.RegionOfInterest(label, bounding_box[int(len(bounding_box)/2):], bounding_box[0:int(len(bounding_box)/2)])
+    return {'image': croppedImage, 'label': croppedLabel}
+
