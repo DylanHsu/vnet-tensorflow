@@ -84,12 +84,12 @@ def evaluate():
 
     input_batch_shape = (FLAGS.batch_size, FLAGS.patch_size, FLAGS.patch_size, FLAGS.patch_layer, 1) #FLAGS.num_channels) 
     output_batch_shape = (FLAGS.batch_size, FLAGS.patch_size, FLAGS.patch_size, FLAGS.patch_layer, 1) # 1 for binary classification
-    images_placeholder_eval = tf.placeholder(tf.float32, shape=input_batch_shape, name="images_placeholder")
-    labels_placeholder_eval = tf.placeholder(tf.int32, shape=output_batch_shape, name="labels_placeholder")   
+    #images_placeholder_eval = tf.placeholder(tf.float32, shape=input_batch_shape, name="images_placeholder")
+    #labels_placeholder_eval = tf.placeholder(tf.int32, shape=output_batch_shape, name="labels_placeholder")   
     # create transformations to image and labels
     transforms = [
         # NiftiDataset.Normalization(),
-        NiftiDataset.StatisticalNormalization(2.5),
+        NiftiDataset.StatisticalNormalization(3.0,nonzero_only=True),
         #NiftiDataset.Resample(0.75),
         #NiftiDataset.Padding((FLAGS.patch_size, FLAGS.patch_size, FLAGS.patch_layer))      
         ]
@@ -181,9 +181,9 @@ def evaluate():
                 label_np = np.transpose(label_np,(2,1,0))
                 true_label_np = np.transpose(true_label_np,(2,1,0))
                 softmax_np = np.transpose(softmax_np,(2,1,0))
-                print('after transpose, image_np has shape ', image_np.shape)
-                print('after transpose, label_np has shape ', label_np.shape)
-                print('after transpose, softmax_np has shape ', softmax_np.shape)
+                #print('after transpose, image_np has shape ', image_np.shape)
+                #print('after transpose, label_np has shape ', label_np.shape)
+                #print('after transpose, softmax_np has shape ', softmax_np.shape)
 
                 # a weighting matrix will be used for averaging the overlapped region
                 weight_np = np.zeros(label_np.shape)
@@ -231,7 +231,7 @@ def evaluate():
                 # acutal segmentation
                 for i in tqdm(range(len(batches))):
                     batch = batches[i]
-                    [pred, softmax] = sess.run(['predicted_label/prediction:0','softmax/softmax:0'], feed_dict={images_placeholder_eval: batch})
+                    [pred, softmax] = sess.run(['predicted_label/prediction:0','softmax/softmax:0'], feed_dict={'images_placeholder:0': batch})
                     istart = ijk_patch_indices[i][0][0]
                     iend = ijk_patch_indices[i][0][1]
                     jstart = ijk_patch_indices[i][0][2]
@@ -244,15 +244,16 @@ def evaluate():
 
                 print("{}: Evaluation complete".format(datetime.datetime.now()))
                 # eliminate overlapping region using the weighted value
-                label_np = np.rint(np.float32(label_np)/np.float32(weight_np) + 0.01)
+                label_np = np.rint(np.float32(label_np)/np.float32(weight_np)) + 0.001)
                 #softmax_np = softmax_np/np.float32(weight_np)
                 softmax_np = softmax_np/np.float16(weight_np)
                 
                 softmax_onehot = np.transpose(np.asarray([1-softmax_np,softmax_np],np.float32),(1,2,3,0))
                 true_label_onehot = np.eye(2)[true_label_np]
-                the_dice = np_dice_coe(softmax_onehot, true_label_onehot,loss_type='sorensen', axis=[0,1,2,3])
-                #true_dice = np_dice_coe(true_label_onehot, true_label_onehot,loss_type='sorensen', axis=[0,1,2,3])
-                #print('Dice score is %.3f, true label dice score is %.3f' % (the_dice,true_dice))
+                label_onehot = np.eye(2)[label_np.astype(np.int16)]
+                the_dice = np_dice_coe(label_onehot, true_label_onehot,loss_type='sorensen', axis=[0,1,2,3])
+                true_dice = np_dice_coe(true_label_onehot, true_label_onehot,loss_type='sorensen', axis=[0,1,2,3])
+                print('Dice score is %.3f, true label dice score is %.3f' % (the_dice,true_dice))
 
                 f_dice = open(os.path.join(FLAGS.data_dir,case,'dice.txt'), 'w')
                 f_dice.write("%.3f"%(the_dice))

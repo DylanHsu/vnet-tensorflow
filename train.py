@@ -13,13 +13,13 @@ from tensorflow.python import debug as tf_debug
 import logging
 import resource
 
-#logging.basicConfig(level=logging.DEBUG, format='%(asctime)s %(levelname)-8s %(message)s')
 console = logging.StreamHandler(sys.stdout)
 console.setLevel(logging.DEBUG)
-console.setFormatter(logging.Formatter('%(asctime)s %(levelname)-8s %(message)s'))
-vnet_logger = logging.getLogger('vnet_trainer')
-vnet_logger.addHandler(console)
-vnet_logger.setLevel(logging.DEBUG)
+console.setFormatter(logging.Formatter('%(asctime)s %(levelname)-8s %(message)s','%m-%d %H:%M:%S'))
+logger = logging.getLogger('vnet_trainer')
+logger.addHandler(console)
+logger.setLevel(logging.DEBUG)
+logger.propagate = False
 
 # select gpu devices
 os.environ["CUDA_VISIBLE_DEVICES"] = "0" # e.g. "0,1,2", "0,2" 
@@ -70,7 +70,7 @@ tf.app.flags.DEFINE_string('model_dir','./tmp/model',
     """Directory to save model""")
 tf.app.flags.DEFINE_bool('restore_training',True,
     """Restore training from last checkpoint""")
-tf.app.flags.DEFINE_float('drop_ratio',0,
+tf.app.flags.DEFINE_float('drop_ratio',0.5,
     """Probability to drop a cropped area if the label is empty. All empty patches will be dropped for 0 and accept all cropped patches if set to 1""")
 tf.app.flags.DEFINE_integer('min_pixel',10,
     """Minimum non-zero pixels in the cropped label""")
@@ -86,6 +86,8 @@ tf.app.flags.DEFINE_boolean('is_batch_job',False,
     """Disable some features if this is a batch job""")
 tf.app.flags.DEFINE_string('batch_job_name','',
     """Name the batch job so the checkpoints and tensorboard output are identifiable.""")
+tf.app.flags.DEFINE_float('max_ram','15.5',
+    """Maximum amount of RAM usable by the CPU in GB.""")
 
 # tf.app.flags.DEFINE_float('class_weight',0.15,
 #     """The weight used for imbalanced classes data. Currently only apply on binary segmentation class (weight for 0th class, (1-weight) for 1st class)""")
@@ -163,6 +165,13 @@ def dice_coe(output, target, loss_type='jaccard', axis=[1, 2, 3], smooth=1e-5):
 
 def train():
     """Train the Vnet model"""
+    resource.setrlimit(resource.RLIMIT_DATA,(math.ceil((FLAGS.max_ram-1.)*(1024**2)*1000),math.ceil(FLAGS.max_ram*(1024**2)*1000))) # 1000 MB ~ 1 GB
+    latest_filename = "checkpoint"
+    if FLAGS.is_batch_job and FLAGS.batch_job_name is not '':
+        latest_filename = latest_filename + "_" + FLAGS.batch_job_name
+        resource.setrlimit(resource.RLIMIT_CORE,(524288,-1))
+    latest_filename += "_latest"
+    
     with tf.Graph().as_default():
         global_step = tf.train.get_or_create_global_step()
 
@@ -186,32 +195,29 @@ def train():
         test_data_dir = os.path.join(FLAGS.data_dir,'testing')
         # support multiple image input, but here only use single channel, label file should be a single file with different classes
         
-        latest_filename = "checkpoint"
-        if FLAGS.is_batch_job and FLAGS.batch_job_name is not '':
-            latest_filename = latest_filename + "_" + FLAGS.batch_job_name
-            resource.setrlimit(resource.RLIMIT_CORE,(524288,-1))
-        latest_filename += "_latest"
 
         # Force input pipepline to CPU:0 to avoid operations sometimes ended up at GPU and resulting a slow down
         with tf.device('/cpu:0'):
             # create transformations to image and labels
             trainTransforms = [
-                NiftiDataset.StatisticalNormalization(2.5),
+                NiftiDataset.StatisticalNormalization(3.0, nonzero_only=True),
                 NiftiDataset.ThresholdCrop(),
-                NiftiDataset.RandomRotation(),
-                NiftiDataset.ThresholdCrop(),
-                NiftiDataset.Padding((FLAGS.patch_size, FLAGS.patch_size, FLAGS.patch_layer)),
-                NiftiDataset.ConfidenceCrop((FLAGS.patch_size,FLAGS.patch_size,FLAGS.patch_layer), FLAGS.ccrop_sigma),
-                NiftiDataset.RandomNoise(),
+                #NiftiDataset.RandomRotation(),
+                #NiftiDataset.ThresholdCrop(),
+                #NiftiDataset.Padding((FLAGS.patch_size, FLAGS.patch_size, FLAGS.patch_layer)),
+                #NiftiDataset.ConfidenceCrop((FLAGS.patch_size,FLAGS.patch_size,FLAGS.patch_layer), FLAGS.ccrop_sigma),
+                NiftiDataset.RandomCrop((FLAGS.patch_size, FLAGS.patch_size, FLAGS.patch_layer),FLAGS.drop_ratio,FLAGS.min_pixel)
+                #NiftiDataset.RandomNoise(),
                 # NiftiDataset.Normalization(),
                 #NiftiDataset.Resample((0.45,0.45,0.45)),
-                #NiftiDataset.RandomCrop((FLAGS.patch_size, FLAGS.patch_size, FLAGS.patch_layer),FLAGS.drop_ratio,FLAGS.min_pixel)
                 ]
             testTransforms = [
-                NiftiDataset.StatisticalNormalization(2.5),
+                NiftiDataset.StatisticalNormalization(3.0, nonzero_only=True),
                 NiftiDataset.ThresholdCrop(),
-                NiftiDataset.Padding((FLAGS.patch_size, FLAGS.patch_size, FLAGS.patch_layer)),
-                NiftiDataset.RandomCrop((FLAGS.patch_size, FLAGS.patch_size, FLAGS.patch_layer),0.5,10)
+                NiftiDataset.RandomCrop((FLAGS.patch_size, FLAGS.patch_size, FLAGS.patch_layer),0.5,FLAGS.min_pixel)
+                #NiftiDataset.Padding((FLAGS.patch_size, FLAGS.patch_size, FLAGS.patch_layer)),
+                #NiftiDataset.RandomCrop((FLAGS.patch_size, FLAGS.patch_size, FLAGS.patch_layer),0.5,10),
+                #NiftiDataset.ConfidenceCrop((FLAGS.patch_size,FLAGS.patch_size,FLAGS.patch_layer), FLAGS.ccrop_sigma),
                 #NiftiDataset.ConfidenceCrop((FLAGS.patch_size,FLAGS.patch_size,FLAGS.patch_layer), 1.0),
                 # NiftiDataset.Normalization(),
                 #NiftiDataset.Resample((0.45,0.45,0.45)),
@@ -231,7 +237,6 @@ def train():
             trainDataset = TrainDataset.get_dataset()
             # Here there are batches of size num_crops, unbatch and shuffle
             trainDataset = trainDataset.apply(tf.contrib.data.unbatch())
-            trainDataset = trainDataset.shuffle(buffer_size=FLAGS.shuffle_buffer_size)
             trainDataset = trainDataset.batch(FLAGS.batch_size)
             trainDataset = trainDataset.prefetch(1)
             #trainDataset = trainDataset.apply(tf.contrib.data.prefetch_to_device('/gpu:0'))
@@ -256,7 +261,6 @@ def train():
             testDataset = TestDataset.get_dataset()
             # Here there are batches of size num_crops, unbatch and shuffle
             testDataset = testDataset.apply(tf.contrib.data.unbatch())
-            testDataset = testDataset.shuffle(buffer_size=FLAGS.shuffle_buffer_size)
             testDataset = testDataset.batch(FLAGS.batch_size)
             testDataset = testDataset.prefetch(1)
             #testDataset = testDataset.apply(tf.contrib.data.prefetch_to_device('/gpu:0'))
@@ -359,7 +363,12 @@ def train():
 
         with tf.name_scope("weighted_cross_entropy"):
             #class_weights = tf.constant([1.0, 1.0])
-            class_weights = tf.constant([1.0, 100.0])
+            #class_weights = tf.constant([1.0, 10.0])
+
+            total_volume = tf.constant(FLAGS.patch_size*FLAGS.patch_size*FLAGS.patch_layer, tf.float32)
+            label_volume = tf.cast(tf.reduce_sum(labels_placeholder),dtype=tf.float32);
+            true_weight = tf.cond(label_volume>0, lambda: tf.divide(tf.divide(total_volume,label_volume), tf.constant(FLAGS.drop_ratio,tf.float32)), lambda: tf.constant(1.0, dtype=tf.float32))
+            class_weights = tf.stack([tf.constant(1.0, dtype=tf.float32), true_weight],0)
 
             # deduce weights for batch samples based on their true label
             onehot_labels = tf.one_hot(tf.squeeze(labels_placeholder,squeeze_dims=[4]),depth = 2)
@@ -374,6 +383,8 @@ def train():
             weighted_loss = unweighted_loss * weights
             # reduce the result to get your final loss
             weighted_loss_op = tf.reduce_mean(weighted_loss)
+            
+            weighted_loss_op = tf.reduce_mean(tf.nn.weighted_cross_entropy_with_logits(onehot_labels,logits,10000))
                 
         #tf.summary.scalar('weighted_XE_loss',weighted_loss_op)
 
@@ -402,8 +413,13 @@ def train():
             # jaccard = dice_coe(softmax_op,tf.cast(tf.one_hot(labels_placeholder[:,:,:,:,0],depth=2),dtype=tf.float32), loss_type='jaccard', axis=[1,2,3,4])
             
             # Computing the dice using only the second row of the 2-entry softmax vector seems more useful
-            dice = dice_coe(softmax_op[:,:,:,:,1],tf.cast(labels_placeholder[:,:,:,:,0],dtype=tf.float32), loss_type='dice', axis=[1,2,3])
-            jaccard  = dice_coe(softmax_op[:,:,:,:,1],tf.cast(labels_placeholder[:,:,:,:,0],dtype=tf.float32), loss_type='jaccard', axis=[1,2,3])
+            #dice = dice_coe(softmax_op[:,:,:,:,1],tf.cast(labels_placeholder[:,:,:,:,0],dtype=tf.float32), loss_type='dice', axis=[1,2,3])
+            #jaccard  = dice_coe(softmax_op[:,:,:,:,1],tf.cast(labels_placeholder[:,:,:,:,0],dtype=tf.float32), loss_type='jaccard', axis=[1,2,3])
+            
+            # Hard versions
+            dice = dice_coe(tf.round(softmax_op[:,:,:,:,1]), tf.cast(labels_placeholder[:,:,:,:,0],dtype=tf.float32), loss_type='dice',axis=[1,2,3])
+            jaccard  = dice_coe(tf.round(softmax_op[:,:,:,:,1]),tf.cast(labels_placeholder[:,:,:,:,0],dtype=tf.float32), loss_type='jaccard', axis=[1,2,3])
+
             dice_loss = 1. - dice
             jaccard_loss = 1. - jaccard
             
@@ -511,6 +527,7 @@ def train():
         print("Setting up Saver...")
         saver = tf.train.Saver(keep_checkpoint_every_n_hours=10000,max_to_keep=3)
 
+        #config = tf.ConfigProto(device_count={"CPU": 4})
         config = tf.ConfigProto()
         config.gpu_options.allow_growth = True
         # config.gpu_options.per_process_gpu_memory_fraction = 0.4
@@ -550,25 +567,25 @@ def train():
             
             print("{}: Last checkpoint epoch: {}".format(datetime.datetime.now(),start_epoch.eval()[0]))
             print("{}: Last checkpoint global step: {}".format(datetime.datetime.now(),tf.train.global_step(sess, global_step)))
-
+            sess.graph.finalize()
             # loop over epochs
             for epoch in np.arange(start_epoch.eval(), FLAGS.epochs):
               # initialize iterator in each new epoch
               sess.run(train_iterator.initializer)
               sess.run(test_iterator.initializer)
-              vnet_logger.info("Epoch %d starts"%(epoch+1))
+              logger.info("Epoch %d starts"%(epoch+1))
 
               # training phase
               train_loss_avg = 0.0
               n_train = 0
               model.is_training = True;
-              vnet_logger.debug('Beginning accumulation batch')
+              logger.debug('Beginning accumulation batch')
               while True: # Beginning of Accumulation batch
                 try:
-                  vnet_logger.debug('Zeroing gradients and loss sums')
+                  logger.debug('Zeroing gradients and loss sums')
                   sess.run(zero_op) # reset gradient accumulation
                   sess.run(sum_zero_op) # reset loss-averaging
-                  vnet_logger.debug('Beginning loop over the accumulation crops')
+                  logger.debug('Beginning loop over the accumulation crops')
                   for i in range(n_accum_crops):
                     [image, label] = sess.run(next_element_train)
                     image = image[:,:,:,:,:] #image[:,:,:,:,np.newaxis]
@@ -577,9 +594,9 @@ def train():
                     # This is redundant, remove this when we can get the average loss for all supported loss functions
                     train_loss_avg += train_loss
                     n_train += 1
-                  vnet_logger.info("Applying gradients, n_train=%d"%n_train)
+                  logger.debug("Applying gradients after total %d accumulations"%n_train)
                   sess.run(apply_gradients_op)
-                  vnet_logger.debug('Applying summary op')
+                  logger.debug('Applying summary op')
                   summary = sess.run(summary_op)
                   train_summary_writer.add_summary(summary, global_step=tf.train.global_step(sess, global_step))
                 except tf.errors.OutOfRangeError:
@@ -587,7 +604,7 @@ def train():
                   # This can explode the gradients, especially if i=0 at the time of this exception
                   # I don't think we should really do this?
                   if n_train % (n_accum_crops) != 0:
-                    print("Applying gradients, n_train=%d"%n_train)
+                    logger.debug("Applying gradients after total %d accumulations"%n_train)
                     sess.run(apply_gradients_op)
                     summary = sess.run(summary_op)
                     train_summary_writer.add_summary(summary, global_step=tf.train.global_step(sess, global_step))
@@ -607,6 +624,9 @@ def train():
                       latest_filename=latest_filename)
                   print("{}: Saving checkpoint succeed".format(datetime.datetime.now()))
                   break
+                except MemoryError:
+                  logger.error("Terminating due to exceeded memory limit. I am justly killed with mine own treachery!")
+                  sys.exit(1)
               
               # testing phase
               print("{}: Training of epoch {} finishes, testing start".format(datetime.datetime.now(),epoch+1))
@@ -632,6 +652,9 @@ def train():
                   summary = sess.run(summary_op)
                   test_summary_writer.add_summary(summary, global_step=tf.train.global_step(sess, global_step))
                   break
+                except MemoryError:
+                  logger.error("Terminating due to exceeded memory limit. I am justly killed with mine own treachery!")
+                  sys.exit(1)
 
         # close tensorboard summary writer
         train_summary_writer.close()

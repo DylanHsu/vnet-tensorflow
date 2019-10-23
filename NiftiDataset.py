@@ -179,10 +179,13 @@ class StatisticalNormalization(object):
   Normalize an image by mapping intensity with intensity distribution
   """
 
-  def __init__(self, sigma):
+  def __init__(self, sigma, nonzero_only=False):
     self.name = 'StatisticalNormalization'
     assert isinstance(sigma, float)
+    assert isinstance(nonzero_only, bool)
     self.sigma = sigma
+    self.nonzero_only = nonzero_only
+    self.threshold = 0.01
 
   def __call__(self, sample):
     image, label = sample['image'], sample['label']
@@ -192,12 +195,21 @@ class StatisticalNormalization(object):
     intensityWindowingFilter.SetOutputMaximum(255)
     intensityWindowingFilter.SetOutputMinimum(0)
     for i,volume in enumerate(image):
-      statisticsFilter.Execute(volume) # This returns None type
-
+      if self.nonzero_only:
+        volume_np = sitk.GetArrayFromImage(volume)
+        nonzero_voxels = volume_np[volume_np > self.threshold]
+        # Hack to use SITK multithreaded computation
+        # This speeds up the calculation by over a factor of 50
+        # Create a 1xN image of the nonzero voxels then calculate the stats
+        nv_strand = sitk.GetImageFromArray(nonzero_voxels[:,np.newaxis])
+        statisticsFilter.Execute(nv_strand)
+      else:
+        statisticsFilter.Execute(volume)
+      
       intensityWindowingFilter.SetWindowMaximum(statisticsFilter.GetMean()+self.sigma*statisticsFilter.GetSigma());
-      intensityWindowingFilter.SetWindowMinimum(statisticsFilter.GetMean()-self.sigma*statisticsFilter.GetSigma());
+      intensityWindowingFilter.SetWindowMinimum(max(self.threshold, statisticsFilter.GetMean()-self.sigma*statisticsFilter.GetSigma()));
+      
       normalizedImage[i] = intensityWindowingFilter.Execute(volume)
-
     return {'image': normalizedImage, 'label': label}
 
 class ManualNormalization(object):
