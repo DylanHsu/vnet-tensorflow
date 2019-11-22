@@ -64,17 +64,7 @@ class NiftiDataset(object):
   def input_parser(self,image_path, label_path):
     # read image and label
     image = self.read_image(image_path.decode("utf-8"))
-    # cast image and label
     castImageFilter = sitk.CastImageFilter()
-    if self.train:
-      label = self.read_image(label_path.decode("utf-8"))
-      castImageFilter.SetOutputPixelType(sitk.sitkInt8)
-      label = castImageFilter.Execute(label)
-    else:
-      # Not sure this handles the case where "image" is 4D
-      label = sitk.Image(image.GetSize(),sitk.sitkInt8)
-      label.SetOrigin(image.GetOrigin())
-      label.SetSpacing(image.GetSpacing())
 
     castImageFilter.SetOutputPixelType(sitk.sitkInt16)
     # Workaround: convert to 4D Numpy then back to 3D SimpleITK images
@@ -99,6 +89,17 @@ class NiftiDataset(object):
         itkImage3d.SetDirection(image.GetDirection())
         itkImage3d = castImageFilter.Execute(itkImage3d)
         itkImages3d += [itkImage3d]
+    
+    if self.train:
+      label = self.read_image(label_path.decode("utf-8"))
+      castImageFilter.SetOutputPixelType(sitk.sitkInt8)
+      label = castImageFilter.Execute(label)
+    else:
+      # Not sure this handles the case where "image" is 4D
+      label = sitk.Image(itkImages3d[0].GetSize(),sitk.sitkInt8)
+      label.SetOrigin(itkImages3d[0].GetOrigin())
+      label.SetSpacing(itkImages3d[0].GetSpacing())
+      label.SetDirection(itkImages3d[0].GetDirection())
     # Form the sample dict with the list of 3D ITK Images and the label
     sample = {'image': itkImages3d, 'label':label}
     
@@ -179,11 +180,15 @@ class StatisticalNormalization(object):
   Normalize an image by mapping intensity with intensity distribution
   """
 
-  def __init__(self, sigma, nonzero_only=False):
+  def __init__(self, sigmaUp, sigmaDown, nonzero_only=False):
     self.name = 'StatisticalNormalization'
-    assert isinstance(sigma, float)
+    #assert isinstance(nSigma, float)
+    #self.nSigma = nSigma
+    assert isinstance(sigmaUp, float)
+    assert isinstance(sigmaDown, float)
     assert isinstance(nonzero_only, bool)
-    self.sigma = sigma
+    self.sigmaUp = sigmaUp
+    self.sigmaDown = sigmaDown
     self.nonzero_only = nonzero_only
     self.threshold = 0.01
 
@@ -198,16 +203,31 @@ class StatisticalNormalization(object):
       if self.nonzero_only:
         volume_np = sitk.GetArrayFromImage(volume)
         nonzero_voxels = volume_np[volume_np > self.threshold]
+        # Catastrophic cancellation:
+        #mean = np.dot(nonzero_voxels, np.ones(nonzero_voxels.shape)) / nonzero_voxels.size
+        #x2bar = np.dot(nonzero_voxels, nonzero_voxels) / nonzero_voxels.size
+        #sigma = math.sqrt(x2bar - mean**2)
+
         # Hack to use SITK multithreaded computation
         # This speeds up the calculation by over a factor of 50
         # Create a 1xN image of the nonzero voxels then calculate the stats
-        nv_strand = sitk.GetImageFromArray(nonzero_voxels[:,np.newaxis])
-        statisticsFilter.Execute(nv_strand)
+        # Well, this is commented out because it's causing segfaults
+        #nv_strand = sitk.GetImageFromArray(nonzero_voxels[:,np.newaxis])
+        #statisticsFilter.Execute(nv_strand)
+        #sigma = statisticsFilter.GetSigma()
+        #mean = statisticsFilter.GetMean()
+        
+        #Do it the stupid way for now
+        mean = np.mean(nonzero_voxels)
+        sigma = np.std(nonzero_voxels)
+
       else:
         statisticsFilter.Execute(volume)
-      
-      intensityWindowingFilter.SetWindowMaximum(statisticsFilter.GetMean()+self.sigma*statisticsFilter.GetSigma());
-      intensityWindowingFilter.SetWindowMinimum(max(self.threshold, statisticsFilter.GetMean()-self.sigma*statisticsFilter.GetSigma()));
+        sigma = statisticsFilter.GetSigma()
+        mean = statisticsFilter.GetMean()
+
+      intensityWindowingFilter.SetWindowMaximum(mean + self.sigmaUp * sigma)
+      intensityWindowingFilter.SetWindowMinimum(max(self.threshold, mean - self.sigmaDown * sigma))
       
       normalizedImage[i] = intensityWindowingFilter.Execute(volume)
     return {'image': normalizedImage, 'label': label}
@@ -628,9 +648,10 @@ class RandomRotation(object):
   Rotate an image by a random amount
   """
 
-  def __init__(self, interpolator=sitk.sitkBSpline):
+  def __init__(self, interpolator=sitk.sitkBSpline, maxRot=2*np.pi):
     self.name = 'RandomRotation'
     self.interpolator = interpolator
+    self.maxRot = maxRot
 
   def __call__(self, sample):
     image, label = sample['image'], sample['label']
@@ -659,7 +680,7 @@ class RandomRotation(object):
     x = np.sin( theta) * np.cos( phi )
     y = np.sin( theta) * np.sin( phi )
     z = np.cos( theta )
-    alpha = np.random.uniform(0, np.pi*2) # amount to rotate by
+    alpha = np.random.uniform(0, self.maxRot) # amount to rotate by
     rotation = sitk.VersorTransform((x,y,z), alpha)
     rotation.SetCenter(rot_center)
     
