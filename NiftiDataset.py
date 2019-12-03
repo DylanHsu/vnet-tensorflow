@@ -66,6 +66,7 @@ class NiftiDataset(object):
     image = self.read_image(image_path.decode("utf-8"))
     castImageFilter = sitk.CastImageFilter()
 
+    #castImageFilter.SetOutputPixelType(sitk.sitkFloat32)
     castImageFilter.SetOutputPixelType(sitk.sitkInt16)
     # Workaround: convert to 4D Numpy then back to 3D SimpleITK images
     # This will have length N, where N is the number of (MRI) series
@@ -227,7 +228,8 @@ class StatisticalNormalization(object):
         mean = statisticsFilter.GetMean()
 
       intensityWindowingFilter.SetWindowMaximum(mean + self.sigmaUp * sigma)
-      intensityWindowingFilter.SetWindowMinimum(max(self.threshold, mean - self.sigmaDown * sigma))
+      #intensityWindowingFilter.SetWindowMinimum(max(self.threshold, mean - self.sigmaDown * sigma))
+      intensityWindowingFilter.SetWindowMinimum(mean - self.sigmaDown * sigma)
       
       normalizedImage[i] = intensityWindowingFilter.Execute(volume)
     return {'image': normalizedImage, 'label': label}

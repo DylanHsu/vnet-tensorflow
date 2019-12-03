@@ -91,7 +91,7 @@ tf.app.flags.DEFINE_float('max_ram',15.5,
 tf.app.flags.DEFINE_float('wce_weight','10',
     """Weight to use for the True labels to fight class imbalance in the Weighted Cross Entropy.""")
 
-tf.app.flags.DEFINE_string('vnet_convs','1,2,3,3',
+tf.app.flags.DEFINE_string('vnet_convs','1,2,3,3,3',
     """Convolutions in each VNET layer.""")
 tf.app.flags.DEFINE_integer('vnet_channels',16,
     """Channels after initial VNET convolution.""")
@@ -219,28 +219,28 @@ def train():
         with tf.device('/cpu:0'):
             # create transformations to image and labels
             trainTransforms = [
-                NiftiDataset.StatisticalNormalization(3.0, 3.0, nonzero_only=True),
+                NiftiDataset.StatisticalNormalization(5.0, 5.0, nonzero_only=True),
                 #NiftiDataset.ThresholdCrop(),
                 #NiftiDataset.RandomRotation(maxRot = 0.08727), # 5 degrees maximum
-                NiftiDataset.RandomRotation(maxRot = 10*0.01745), 
-                NiftiDataset.ThresholdCrop(),
-                NiftiDataset.Padding((FLAGS.patch_size, FLAGS.patch_size, FLAGS.patch_layer)),
-                NiftiDataset.BSplineDeformation(),
-                #NiftiDataset.ConfidenceCrop((FLAGS.patch_size,FLAGS.patch_size,FLAGS.patch_layer), FLAGS.ccrop_sigma),
-                NiftiDataset.RandomCrop((FLAGS.patch_size, FLAGS.patch_size, FLAGS.patch_layer),FLAGS.drop_ratio,FLAGS.min_pixel),
+                #NiftiDataset.RandomRotation(maxRot = 10*0.01745), 
+                #NiftiDataset.ThresholdCrop(),
+                #NiftiDataset.Padding((FLAGS.patch_size, FLAGS.patch_size, FLAGS.patch_layer)),
+                #NiftiDataset.BSplineDeformation(),
+                NiftiDataset.ConfidenceCrop((FLAGS.patch_size,FLAGS.patch_size,FLAGS.patch_layer), FLAGS.ccrop_sigma),
+                #NiftiDataset.RandomCrop((FLAGS.patch_size, FLAGS.patch_size, FLAGS.patch_layer),FLAGS.drop_ratio,FLAGS.min_pixel),
                 NiftiDataset.RandomNoise(),
                 # NiftiDataset.Normalization(),
                 #NiftiDataset.Resample((0.45,0.45,0.45)),
                 ]
             testTransforms = [
-                NiftiDataset.StatisticalNormalization(3.0, 3.0, nonzero_only=True),
+                NiftiDataset.StatisticalNormalization(5.0, 5.0, nonzero_only=True),
                 #NiftiDataset.ThresholdCrop(),
                 #NiftiDataset.RandomCrop((FLAGS.patch_size, FLAGS.patch_size, FLAGS.patch_layer),0.5,FLAGS.min_pixel)
-                NiftiDataset.RandomCrop((FLAGS.patch_size, FLAGS.patch_size, FLAGS.patch_layer),FLAGS.drop_ratio,FLAGS.min_pixel)
+                #NiftiDataset.RandomCrop((FLAGS.patch_size, FLAGS.patch_size, FLAGS.patch_layer),FLAGS.drop_ratio,FLAGS.min_pixel)
                 #NiftiDataset.Padding((FLAGS.patch_size, FLAGS.patch_size, FLAGS.patch_layer)),
                 #NiftiDataset.RandomCrop((FLAGS.patch_size, FLAGS.patch_size, FLAGS.patch_layer),0.5,10),
                 #NiftiDataset.ConfidenceCrop((FLAGS.patch_size,FLAGS.patch_size,FLAGS.patch_layer), FLAGS.ccrop_sigma),
-                #NiftiDataset.ConfidenceCrop((FLAGS.patch_size,FLAGS.patch_size,FLAGS.patch_layer), 1.0),
+                NiftiDataset.ConfidenceCrop((FLAGS.patch_size,FLAGS.patch_size,FLAGS.patch_layer), 0.5),
                 # NiftiDataset.Normalization(),
                 #NiftiDataset.Resample((0.45,0.45,0.45)),
                 #NiftiDataset.Padding((FLAGS.patch_size, FLAGS.patch_size, FLAGS.patch_layer)),
@@ -308,9 +308,9 @@ def train():
                 num_classes=2,   
                 keep_prob=1.0,   
                 num_channels=FLAGS.vnet_channels, 
-                num_levels=len(convs),    
-                num_convolutions= tuple(convs),
-                bottom_convolutions=3, 
+                num_levels=len(convs)-1,    
+                num_convolutions= tuple(convs[0:-1]),
+                bottom_convolutions= convs[-1], 
                 activation_fn="prelu") 
 
             logits = model.network_fn(images_placeholder)
@@ -331,6 +331,7 @@ def train():
             #tf.summary.image("logits_1", tf.transpose(logits_log_1,[3,1,2,0]),max_outputs=FLAGS.patch_layer)
 
         # Exponential decay learning rate
+        # This number is wrong, fix
         train_batches_per_epoch = math.ceil(TrainDataset.data_size/(FLAGS.batch_size * FLAGS.accum_batches))
         decay_steps = train_batches_per_epoch*FLAGS.decay_steps
 
@@ -678,7 +679,7 @@ def train():
                 test_summary_writer.add_graph(sess.graph)
 
             # number of crops for gradient accumulation 
-            n_accum_crops = FLAGS.num_crops * FLAGS.accum_batches # number of crops for gradient accumulation 
+            n_accum_crops = int(round(FLAGS.num_crops * FLAGS.accum_batches / FLAGS.batch_size)) # number of crops for gradient accumulation 
             # restore from checkpoint
             if FLAGS.restore_training:
                 # check if checkpoint exists

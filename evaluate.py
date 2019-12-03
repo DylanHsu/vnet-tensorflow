@@ -261,10 +261,6 @@ def evaluate():
                 true_dice = np_dice_coe(true_label_onehot, true_label_onehot,loss_type='sorensen', axis=[0,1,2,3])
                 print('Dice score is %.3f, true label dice score is %.3f' % (the_dice,true_dice))
 
-                f_dice = open(os.path.join(FLAGS.data_dir,case,'dice%s.txt'%FLAGS.suffix), 'w')
-
-                f_dice.write("%d %.3f"%(true_label_volume, the_dice))
-                f_dice.close()
 
                 # convert back to sitk space
                 label_np = np.transpose(label_np,(2,1,0))
@@ -301,7 +297,12 @@ def evaluate():
                 
                 print("{}: Resampling label back to original image space...".format(datetime.datetime.now()))
                 #label = resampler.Execute(label_tfm)
-                label = label_tfm
+                castFilter = sitk.CastImageFilter()
+                castFilter.SetOutputPixelType(sitk.sitkInt16)
+                label = castFilter.Execute(label_tfm)
+                true_label = castFilter.Execute(true_label)
+
+
                 label_path = os.path.join(FLAGS.data_dir,case,'label_vnet%s.nii.gz'%FLAGS.suffix)
                 writer.SetFileName(label_path)
                 writer.Execute(label)
@@ -314,6 +315,68 @@ def evaluate():
                 #writer.SetFileName(prob_path)
                 #writer.Execute(prob)
                 print("{}: Save evaluate probability map at {} success".format(datetime.datetime.now(),prob_path))
+
+                ccFilter = sitk.ConnectedComponentImageFilter()
+                labelCC = ccFilter.Execute(label)
+                trueLabelCC = ccFilter.Execute(true_label)
+                
+                labelShapeFilter = sitk.LabelShapeStatisticsImageFilter()
+                #labelShapeFilter.SetComputeFeretDiameter(True)
+                labelShapeFilter.Execute(labelCC)
+                trueLabelShapeFilter = sitk.LabelShapeStatisticsImageFilter()
+                #labelShapeFilter.SetComputeFeretDiameter(True)
+                trueLabelShapeFilter.Execute(trueLabelCC)
+
+                biFilter = sitk.LabelMapToBinaryImageFilter()
+                biFilter.SetBackgroundValue(0)
+                biFilter.SetForegroundValue(1)
+                mapFilter = sitk.LabelImageToLabelMapFilter()
+                overlapFilter = sitk.LabelOverlapMeasuresImageFilter()
+                statFilter=sitk.StatisticsImageFilter()
+                
+                trueLabelMap=mapFilter.Execute(trueLabelCC,0)
+                labelMap=mapFilter.Execute(labelCC,0)
+                
+                cubicMmPerVoxel = image.GetSpacing()[0] * image.GetSpacing()[1] * image.GetSpacing()[2];
+                nonartifacts=list(range(1,labelShapeFilter.GetNumberOfLabels()+1))
+                for j in range(1,labelShapeFilter.GetNumberOfLabels()+1):
+                  if (labelShapeFilter.GetNumberOfPixels(j) * cubicMmPerVoxel) < 25.:
+                    nonartifacts.remove(j)
+                
+                falsePositives=list(range(1,trueLabelShapeFilter.GetNumberOfLabels()+1))
+                falseNegatives = nonartifacts 
+                mif=sitk.LabelMapMaskImageFilter()
+                if labelShapeFilter.GetNumberOfLabels()<=5000:
+                  f_specificDice = open(os.path.join(FLAGS.data_dir,case,'specificDice%s.txt'%FLAGS.suffix), 'w')
+                  for i in range(1,trueLabelShapeFilter.GetNumberOfLabels()+1):
+                    mif.SetLabel(i)
+                    true_lesion = mif.Execute(trueLabelMap, true_label)
+                    found_pred = False
+                    specific_dice = 0.0
+                    for j in nonartifacts:
+                      mif.SetLabel(j)
+                      predicted_lesion = mif.Execute(labelMap, label)
+                      overlapFilter.Execute(predicted_lesion, true_lesion)
+                      if overlapFilter.GetDiceCoefficient() > 0.0 and not found_pred:
+                        found_pred = True
+                        specific_dice = overlapFilter.GetDiceCoefficient()
+                        if j in falsePositives:
+                          falsePositives.remove(j)
+                    if found_pred and i in falseNegatives:
+                      falseNegatives.remove(i)
+                    statFilter.Execute(true_lesion)
+                    volumetric_d = ((cubicMmPerVoxel * 6.*statFilter.GetSum()/3.14159) ** (1./3.))
+                    f_specificDice.write("%s %d %.2f %.3f\n"%(case, i, volumetric_d, specific_dice))
+                  f_specificDice.close()
+                
+                f_dice = open(os.path.join(FLAGS.data_dir,case,'dice%s.txt'%FLAGS.suffix), 'w')
+                f_dice.write("%s %d %.3f %d %d\n"%(case, true_label_volume, the_dice, len(falsePositives), len(falseNegatives)))
+                f_dice.close()
+
+
+
+
+
 
 def main(argv=None):
     evaluate()
