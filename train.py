@@ -223,6 +223,7 @@ def train():
         with tf.device('/cpu:0'):
             # create transformations to image and labels
             trainTransforms = [
+                NiftiDataset.RandomHistoMatch(train_data_dir, FLAGS.image_filename, 1.0),
                 NiftiDataset.StatisticalNormalization(5.0, 5.0, nonzero_only=True),
                 #NiftiDataset.ThresholdCrop(),
                 #NiftiDataset.RandomRotation(maxRot = 0.08727), # 5 degrees maximum

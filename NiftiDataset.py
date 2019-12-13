@@ -70,18 +70,15 @@ class NiftiDataset(object):
     castImageFilter.SetOutputPixelType(sitk.sitkInt16)
     # Workaround: convert to 4D Numpy then back to 3D SimpleITK images
     # This will have length N, where N is the number of (MRI) series
-    image_np = sitk.GetArrayFromImage(image)
     itkImages3d = []
-    if len(image_np.shape) == 3:
-      itkImage3d = sitk.GetImageFromArray(image_np)
-      itkImage3d.SetOrigin(image.GetOrigin())
-      itkImage3d.SetSpacing(image.GetSpacing())
-      itkImage3d.SetDirection(image.GetDirection())
-      itkImage3d = castImageFilter.Execute(itkImage3d)
+    #if len(image_np.shape) == 3:
+    if len(image.GetSize()) == 3:
+      itkImage3d = castImageFilter.Execute(image)
       itkImages3d += [itkImage3d]
       #itkImages3d = [image_np]
     else:
       # Weird NIFTI convention: Dimension 3 is the index!
+      image_np = sitk.GetArrayFromImage(image)
       for i in range(image_np.shape[3]): 
         volume = image_np[:,:,:,i]
         itkImage3d = sitk.GetImageFromArray(volume)
@@ -783,4 +780,75 @@ class RandomFlip(object):
       flippedImage[i] = fif.Execute(image[i])
     flippedLabel = fif.Execute(label)
     return {'image': flippedImage, 'label': flippedLabel}
+
+class RandomHistoMatch(object):
+  """
+  Randomly match this image's histogram to that of another.
+  This must be performed *before* any intensity standardization!
+
+  data_dir: Directory containing the cases used for target distributions
+  image_filename: filename of the target image, e.g. 'img.nii.gz'
+  match_prob: Chance to perform a matching
+  """
+  def __init__(self, data_dir, image_filename, match_prob=1.0):
+    self.name = 'RandomHistoMatch'
+    assert isinstance(data_dir, str)
+    self.data_dir = data_dir
+    assert isinstance(image_filename, str)
+    self.image_filename = data_dir
+    assert isinstance(match_prob, float)
+    self.match_prob = match_prob
+    cases = os.listdir(self.data_dir)
+    self.image_paths = []
+    for case in cases:
+      self.image_paths.append(os.path.join(self.data_dir,case,self.image_filename))
+
+  def __call__(self, sample):
+    if (random.random() <= self.match_prob):
+      return sample
+    
+    image, label = sample['image'], sample['label']
+    
+    # Choose a random target image file
+    target_path = random.choice(self.image_paths)
+
+    # Get the array of target images to match to
+    reader = sitk.ImageFileReader()
+    # no utf decoding, since we're not wrapping as a py_func in tf
+    reader.SetFileName(target_path) 
+    target_image = reader.Execute()
+    castImageFilter = sitk.CastImageFilter()
+    castImageFilter.SetOutputPixelType(sitk.sitkInt16)
+    target_images_3d = []
+    if len(target_image.GetSize()) == 3: # 3D image
+      target_image_3d = castImageFilter.Execute(target_image)
+      target_images_3d += [target_image_3d]
+    else: # 4D image, make 3d images from the slices
+      target_image_np = sitk.GetArrayFromImage(image)
+      for i in range(target_image_np.shape[3]): 
+        volume = target_image_np[:,:,:,i]
+        target_image_3d = sitk.GetImageFromArray(volume)
+        target_image_3d.SetOrigin(image.GetOrigin())
+        target_image_3d.SetSpacing(image.GetSpacing())
+        target_image_3d.SetDirection(image.GetDirection())
+        target_image_3d = castImageFilter.Execute(target_image_3d)
+        target_images_3d += [target_image_3d]
+
+    # Match the images in the sample to the images in the target
+    assert len(image) == len(target_images_3d), 'Source and target for matching have different dimensions'
+    histoMatchFilter = sitk.HistogramMatchingImageFilter()
+    histoMatchFilter.SetNumberOfHistogramLevels(500)
+    histoMatchFilter.SetNumberOfMatchPoints(500)
+    
+    matchedImage = []
+    
+    for i in range(len(image)):
+      volume = image[i]
+      target_volume = target_images_3d[i]
+      volume_matched = histoMatchFilter.Execute( volume, target_volume )
+      matchedImage.append(volume_matched)
+
+    return {'image': matchedImage, 'label': label}
+
+
 
