@@ -233,7 +233,7 @@ def train():
                 #NiftiDataset.ConfidenceCrop((FLAGS.patch_size,FLAGS.patch_size,FLAGS.patch_layer), FLAGS.ccrop_sigma),
                 NiftiDataset.RandomCrop((FLAGS.patch_size, FLAGS.patch_size, FLAGS.patch_layer),FLAGS.drop_ratio,FLAGS.min_pixel),
                 NiftiDataset.RandomNoise(),
-                NiftiDataset.RandomFlip(0.5, [0,1,2]),
+                NiftiDataset.RandomFlip(0.5, [True,True,True]),
                 # NiftiDataset.Normalization(),
                 #NiftiDataset.Resample((0.45,0.45,0.45)),
                 ]
@@ -568,7 +568,7 @@ def train():
             t_vars = tf.trainable_variables()
             
             if (FLAGS.l2_weight != 0.):
-              l2_loss = FLAGS.l2_weight * tf.add_n([tf.nn.l2_loss(var) for var in t_vars)])
+              l2_loss = FLAGS.l2_weight * tf.add_n( [tf.nn.l2_loss(var) for var in t_vars])
               l2_grad = optimizer.compute_gradients(l2_loss)
               loss_fn = loss_fn + l2_loss
               tf.summary.scalar('l2_loss',specific_dice_loss_op)
@@ -605,8 +605,6 @@ def train():
               compute_gradient_op = []
               for j in range(len(t_vars)):
                 compute_gradient_op += [accum_tvars[j].assign(specific_dice_gsum[j]) ]
-                if (FLAGS.l2_weight != 0.):
-                  compute_gradient_op += [accum_tvars[j].assign_add( l2_grad[j]) ]
               
             elif FLAGS.loss_function == 'dice':
               # The Dice and Jaccard scores are evaluated across the voxels of all the samples in the batch.
@@ -641,7 +639,7 @@ def train():
 
             if (FLAGS.l2_weight != 0.):
               for j in range(len(t_vars)):
-                compute_gradient_op += [accum_tvars[j].assign_add( l2_grad[j]) ]
+                compute_gradient_op += [accum_tvars[j].assign_add( l2_grad[j][0]) ]
             
             #apply_gradients_op = optimizer.apply_gradients([(accum_tvars[i] / n_ab, batch_grad_var[1]) for i, batch_grad_var in enumerate(batch_grads_vars)], global_step=global_step)
             apply_gradients_op = optimizer.apply_gradients([(accum_tvars[i], t_vars[i]) for i in range(len(t_vars))], global_step=global_step)
@@ -775,7 +773,7 @@ def train():
 
                   logger.debug("Applying gradients after total %d accumulations"%n_train)
                   #if FLAGS.loss_function in ['dice','jaccard','specific_dice']:
-                  if (compute_gradient_op != [])
+                  if (compute_gradient_op != []):
                     sess.run(compute_gradient_op)
                   sess.run(apply_gradients_op)
                   

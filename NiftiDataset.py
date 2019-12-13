@@ -754,32 +754,33 @@ class RandomFlip(object):
   """
   Flip an image about randomly chosen axes.
   flip_prob: chance to flip about a given axis
-  flip_axes: the axes about which you want a chance to flip
+  flip_axes: booleans for the axes about which you want a chance to flip
 
   Note: Not sure right now if [0,1,2]<=>[x,y,z] or [z,y,x]
   """
-  def __init__(self, flip_prob=0.5, flip_axes=[0,1,2]):
+  def __init__(self, flip_prob=0.5, flip_axes=[True,True,True]):
     self.name = 'RandomFlip'
     assert isinstance(flip_prob, (float))
     self.flip_prob = flip_prob
     assert isinstance(flip_axes, (list))
-    self.flip_axes = axes
+    self.flip_axes = flip_axes
 
   def __call__(self, sample):
     
     # Choose axes to flip
     chosen_flip_axes = []
-    for axis in flip_axes:
-      if (random.random() > self.flip_prob):
-        chosen_flip_axes.append(axis)
-    
-    if len(chosen_flip_axes) == 0:
-      return sample
+    for axis in self.flip_axes:
+      if axis is True and (random.random() > self.flip_prob):
+        chosen_flip_axes.append(True)
+      else:
+        chosen_flip_axes.append(False)
     
     image, label = sample['image'], sample['label']
+    flippedImage = image
     fif = sitk.FlipImageFilter()
     fif.SetFlipAxes(chosen_flip_axes)
-    flippedImage = fif.Execute(image)
+    for i in range(0,len(image)):
+      flippedImage[i] = fif.Execute(image[i])
     flippedLabel = fif.Execute(label)
     return {'image': flippedImage, 'label': flippedLabel}
 
