@@ -95,6 +95,10 @@ tf.app.flags.DEFINE_string('vnet_convs','1,2,3,3,3',
     """Convolutions in each VNET layer.""")
 tf.app.flags.DEFINE_integer('vnet_channels',16,
     """Channels after initial VNET convolution.""")
+tf.app.flags.DEFINE_float('dropout_keepprob',1.0,
+    """probability to randomly keep a parameter for dropout (default 1 = no dropout)""")
+tf.app.flags.DEFINE_float('l2_weight',0.0,
+    """Weight for L2 regularization (should be order of 0.0001)""")
 
 # tf.app.flags.DEFINE_float('class_weight',0.15,
 #     """The weight used for imbalanced classes data. Currently only apply on binary segmentation class (weight for 0th class, (1-weight) for 1st class)""")
@@ -225,10 +229,11 @@ def train():
                 #NiftiDataset.RandomRotation(maxRot = 10*0.01745), 
                 #NiftiDataset.ThresholdCrop(),
                 #NiftiDataset.Padding((FLAGS.patch_size, FLAGS.patch_size, FLAGS.patch_layer)),
-                #NiftiDataset.BSplineDeformation(),
-                NiftiDataset.ConfidenceCrop((FLAGS.patch_size,FLAGS.patch_size,FLAGS.patch_layer), FLAGS.ccrop_sigma),
-                #NiftiDataset.RandomCrop((FLAGS.patch_size, FLAGS.patch_size, FLAGS.patch_layer),FLAGS.drop_ratio,FLAGS.min_pixel),
+                NiftiDataset.BSplineDeformation(),
+                #NiftiDataset.ConfidenceCrop((FLAGS.patch_size,FLAGS.patch_size,FLAGS.patch_layer), FLAGS.ccrop_sigma),
+                NiftiDataset.RandomCrop((FLAGS.patch_size, FLAGS.patch_size, FLAGS.patch_layer),FLAGS.drop_ratio,FLAGS.min_pixel),
                 NiftiDataset.RandomNoise(),
+                NiftiDataset.RandomFlip(0.5, [0,1,2]),
                 # NiftiDataset.Normalization(),
                 #NiftiDataset.Resample((0.45,0.45,0.45)),
                 ]
@@ -238,9 +243,9 @@ def train():
                 #NiftiDataset.RandomCrop((FLAGS.patch_size, FLAGS.patch_size, FLAGS.patch_layer),0.5,FLAGS.min_pixel)
                 #NiftiDataset.RandomCrop((FLAGS.patch_size, FLAGS.patch_size, FLAGS.patch_layer),FLAGS.drop_ratio,FLAGS.min_pixel)
                 #NiftiDataset.Padding((FLAGS.patch_size, FLAGS.patch_size, FLAGS.patch_layer)),
-                #NiftiDataset.RandomCrop((FLAGS.patch_size, FLAGS.patch_size, FLAGS.patch_layer),0.5,10),
+                NiftiDataset.RandomCrop((FLAGS.patch_size, FLAGS.patch_size, FLAGS.patch_layer),0,20),
                 #NiftiDataset.ConfidenceCrop((FLAGS.patch_size,FLAGS.patch_size,FLAGS.patch_layer), FLAGS.ccrop_sigma),
-                NiftiDataset.ConfidenceCrop((FLAGS.patch_size,FLAGS.patch_size,FLAGS.patch_layer), 0.5),
+                #NiftiDataset.ConfidenceCrop((FLAGS.patch_size,FLAGS.patch_size,FLAGS.patch_layer), 0.5),
                 # NiftiDataset.Normalization(),
                 #NiftiDataset.Resample((0.45,0.45,0.45)),
                 #NiftiDataset.Padding((FLAGS.patch_size, FLAGS.patch_size, FLAGS.patch_layer)),
@@ -259,6 +264,7 @@ def train():
             trainDataset = TrainDataset.get_dataset()
             # Here there are batches of size num_crops, unbatch and shuffle
             trainDataset = trainDataset.apply(tf.contrib.data.unbatch())
+            trainDataset = trainDataset.repeat(3) 
             trainDataset = trainDataset.batch(FLAGS.batch_size)
             trainDataset = trainDataset.prefetch(5)
             #trainDataset = trainDataset.apply(tf.contrib.data.prefetch_to_device('/gpu:0'))
@@ -283,6 +289,7 @@ def train():
             testDataset = TestDataset.get_dataset()
             # Here there are batches of size num_crops, unbatch and shuffle
             testDataset = testDataset.apply(tf.contrib.data.unbatch())
+            testDataset = testDataset.repeat(3)
             testDataset = testDataset.batch(FLAGS.batch_size)
             testDataset = testDataset.prefetch(5)
             #testDataset = testDataset.apply(tf.contrib.data.prefetch_to_device('/gpu:0'))
@@ -295,18 +302,10 @@ def train():
 
         # Initialize the model
         with tf.name_scope("vnet"):
-            #model = VNet.VNet(
-            #    num_classes=2, # binary for 2
-            #    keep_prob=1.0, # default 1
-            #    num_channels=16, # default 16 
-            #    num_levels=4,  # default 4
-            #    num_convolutions=(1,2,3,3), # default (1,2,3,3), size should equal to num_levels
-            #    bottom_convolutions=3, # default 3
-            #    activation_fn="prelu") # default relu
             convs=[int(i) for i in (FLAGS.vnet_convs).split(',')]
             model = VNet.VNet(
                 num_classes=2,   
-                keep_prob=1.0,   
+                keep_prob=FLAGS.dropout_keepprob,   
                 num_channels=FLAGS.vnet_channels, 
                 num_levels=len(convs)-1,    
                 num_convolutions= tuple(convs[0:-1]),
@@ -382,20 +381,22 @@ def train():
         
         # Op for calculating loss
         with tf.name_scope("cross_entropy"):
-            ce_op = tf.reduce_mean(tf.nn.sparse_softmax_cross_entropy_with_logits(
-                logits=logits,
-                labels=tf.squeeze(labels_placeholder, 
-                squeeze_dims=[4])))
+            #ce_op = tf.reduce_mean(tf.nn.sparse_softmax_cross_entropy_with_logits(
+            #    logits=logits,
+            #    labels=tf.squeeze(labels_placeholder, 
+            #    squeeze_dims=[4])))
+            onehot_labels = tf.one_hot(tf.squeeze(labels_placeholder,squeeze_dims=[4]),depth = 2)
+            ce_op = tf.reduce_mean(tf.nn.weighted_cross_entropy_with_logits(onehot_labels,logits,1.))
             ce_sum  = tf.get_variable("ce_sum" , dtype=tf.float32, trainable=False, initializer=tf.constant(0.))
             ce2_sum = tf.get_variable("ce2_sum", dtype=tf.float32, trainable=False, initializer=tf.constant(0.))
             ce_avg = tf.cond(n_ab > 1., lambda: ce_sum/n_ab, lambda: tf.constant(0.)) 
             ce_stdev = tf.cond(n_ab > 1., lambda: tf.math.sqrt( (n_ab*ce2_sum - ce_sum*ce_sum) / (n_ab * (n_ab-1.))), lambda: tf.constant(0.))
-        tf.summary.scalar('ce_batch',ce_avg)
+            tf.summary.scalar('ce_batch',ce_avg)
 
-        with tf.name_scope("weighted_cross_entropy"):
+        #with tf.name_scope("weighted_cross_entropy"):
             true_weight=FLAGS.wce_weight
             
-            onehot_labels = tf.one_hot(tf.squeeze(labels_placeholder,squeeze_dims=[4]),depth = 2)
+            #onehot_labels = tf.one_hot(tf.squeeze(labels_placeholder,squeeze_dims=[4]),depth = 2)
             wce_op = tf.reduce_mean(tf.nn.weighted_cross_entropy_with_logits(onehot_labels,logits,true_weight))
                 
             wce_sum  = tf.get_variable("wce_sum" , dtype=tf.float32, trainable=False, initializer=tf.constant(0.))
@@ -403,10 +404,10 @@ def train():
             wce_avg = tf.cond(n_ab > 1., lambda: wce_sum/n_ab, lambda: tf.constant(0.)) 
             wce_stdev = tf.cond(n_ab > 1., lambda: tf.math.sqrt( (n_ab*wce2_sum - wce_sum*wce_sum) / (n_ab * (n_ab-1.))), lambda: tf.constant(0.))
         
-        tf.summary.scalar('wce_batch', wce_avg)
+            tf.summary.scalar('wce_batch', wce_avg)
         #tf.summary.scalar('wce_stdev', wce_stdev)
         
-        with tf.name_scope("dynamic_cross_entropy"):
+        #with tf.name_scope("dynamic_cross_entropy"):
             # Dynamically weighted cross entropy
             # The true voxels in this crop receive a weight equal to (crop volume) / sum(true) / drop_ratio
             # This eliminates class imbalance but could cause numerical instability with extremely large crop volumes
@@ -433,7 +434,7 @@ def train():
             dwce_avg = tf.cond(n_ab > 1., lambda: wce_sum/n_ab, lambda: tf.constant(0.)) 
             dwce_stdev = tf.cond(n_ab > 1., lambda: tf.math.sqrt( (n_ab*wce2_sum - wce_sum*wce_sum) / (n_ab * (n_ab-1.))), lambda: tf.constant(0.))
 
-        tf.summary.scalar('dwce_batch', dwce_avg)
+            tf.summary.scalar('dwce_batch', dwce_avg)
         #tf.summary.scalar('weighted_XE_loss',wce_op)
 
         # Argmax Op to generate label from logits
@@ -454,6 +455,8 @@ def train():
         
         # Dice Similarity, currently only for binary segmentation
         with tf.name_scope("dice"):
+            # Define operations to compute Dice quantities
+            
             # dice = dice_coe(tf.expand_dims(softmax_op[:,:,:,:,1],-1),tf.cast(labels_placeholder,dtype=tf.float32), loss_type='dice')
             # jaccard = dice_coe(tf.expand_dims(softmax_op[:,:,:,:,1],-1),tf.cast(labels_placeholder,dtype=tf.float32), loss_type='jaccard')
             
@@ -462,13 +465,8 @@ def train():
             # jaccard = dice_coe(softmax_op,tf.cast(tf.one_hot(labels_placeholder[:,:,:,:,0],depth=2),dtype=tf.float32), loss_type='jaccard', axis=[1,2,3,4])
             
             # Computing the dice using only the second row of the 2-entry softmax vector seems more useful
-            #dice = dice_coe(softmax_op[:,:,:,:,1],tf.cast(labels_placeholder[:,:,:,:,0],dtype=tf.float32), loss_type='dice', axis=[1,2,3])
-            #jaccard  = dice_coe(softmax_op[:,:,:,:,1],tf.cast(labels_placeholder[:,:,:,:,0],dtype=tf.float32), loss_type='jaccard', axis=[1,2,3])
-            
-            # Hard Dice
-            #dice = dice_coe(tf.round(softmax_op[:,:,:,:,1]), tf.cast(labels_placeholder[:,:,:,:,0],dtype=tf.float32), loss_type='dice',axis=[1,2,3])
-            #jaccard  = dice_coe(tf.round(softmax_op[:,:,:,:,1]),tf.cast(labels_placeholder[:,:,:,:,0],dtype=tf.float32), loss_type='jaccard', axis=[1,2,3])
-
+            specific_dice_op     = dice_coe(softmax_op[:,:,:,:,1],tf.cast(labels_placeholder[:,:,:,:,0],dtype=tf.float32), loss_type='dice', axis=[1,2,3])
+            specific_jaccard_op  = dice_coe(softmax_op[:,:,:,:,1],tf.cast(labels_placeholder[:,:,:,:,0],dtype=tf.float32), loss_type='jaccard', axis=[1,2,3])
             
             soft_dice_numerator_op      = dice_coe(softmax_op[:,:,:,:,1], tf.cast(labels_placeholder[:,:,:,:,0],dtype=tf.float32), loss_type='dice',axis=[1,2,3],compute='numerator')
             soft_dice_denominator_op    = dice_coe(softmax_op[:,:,:,:,1], tf.cast(labels_placeholder[:,:,:,:,0],dtype=tf.float32), loss_type='dice',axis=[1,2,3],compute='denominator')
@@ -480,15 +478,22 @@ def train():
             hard_jaccard_numerator_op   = dice_coe(tf.round(softmax_op[:,:,:,:,1]), tf.cast(labels_placeholder[:,:,:,:,0],dtype=tf.float32), loss_type='jaccard',axis=[1,2,3],compute='numerator')
             hard_jaccard_denominator_op = dice_coe(tf.round(softmax_op[:,:,:,:,1]), tf.cast(labels_placeholder[:,:,:,:,0],dtype=tf.float32), loss_type='jaccard',axis=[1,2,3],compute='denominator')
             
+            # Define variables for accumulating Dice quantities and their gradients
             soft_dice_numerator_sum    = tf.get_variable("soft_dice_numerator_sum"   , dtype=tf.float32, trainable=False, initializer=tf.constant(0.))
             soft_dice_denominator_sum  = tf.get_variable("soft_dice_denominator_sum" , dtype=tf.float32, trainable=False, initializer=tf.constant(0.))
             soft_jaccard_numerator_sum    = tf.get_variable("soft_jaccard_numerator_sum"   , dtype=tf.float32, trainable=False, initializer=tf.constant(0.))
             soft_jaccard_denominator_sum  = tf.get_variable("soft_jaccard_denominator_sum" , dtype=tf.float32, trainable=False, initializer=tf.constant(0.))
+            
+            specific_dice_sum  = tf.get_variable("specific_dice_sum" , dtype=tf.float32, trainable=False, initializer=tf.constant(0.))
+            specific_jaccard_sum  = tf.get_variable("specific_jaccard_sum" , dtype=tf.float32, trainable=False, initializer=tf.constant(0.))
+
             # Sum the Gradient of these terms to calculate the Gradient of composite dice later
             # List of variables of length equal to the number of trainable variables
             t_vars = tf.trainable_variables()
             soft_numerator_gsum       = [tf.Variable(tf.zeros_like(t_var.initialized_value()),trainable=False) for t_var in t_vars] 
             soft_denominator_gsum     = [tf.Variable(tf.zeros_like(t_var.initialized_value()),trainable=False) for t_var in t_vars] 
+
+            specific_dice_gsum = [tf.Variable(tf.zeros_like(t_var.initialized_value()),trainable=False) for t_var in t_vars]
             
             hard_dice_numerator_sum    = tf.get_variable("hard_dice_numerator_sum"   , dtype=tf.float32, trainable=False, initializer=tf.constant(0.))
             hard_dice_denominator_sum  = tf.get_variable("hard_dice_denominator_sum" , dtype=tf.float32, trainable=False, initializer=tf.constant(0.))
@@ -500,17 +505,29 @@ def train():
             #hard_dice_batch = tf.cond(n_ab > 0., lambda: (hard_dice_numerator_sum+smooth_batch)/(hard_dice_denominator_sum+smooth_batch), lambda: tf.constant(0.))
             #soft_jaccard_batch = tf.cond(n_ab > 0., lambda: (soft_jaccard_numerator_sum+smooth_batch)/(soft_jaccard_denominator_sum+smooth_batch), lambda: tf.constant(0.))
             #hard_jaccard_batch = tf.cond(n_ab > 0., lambda: (hard_jaccard_numerator_sum+smooth_batch)/(hard_jaccard_denominator_sum+smooth_batch), lambda: tf.constant(0.))
+            
+            # Operations to compute the metric for the batch
+            
             soft_dice_batch    = (soft_dice_numerator_sum+smooth_batch)/(soft_dice_denominator_sum+smooth_batch)
             hard_dice_batch    = (hard_dice_numerator_sum+smooth_batch)/(hard_dice_denominator_sum+smooth_batch)
             soft_jaccard_batch = (soft_jaccard_numerator_sum+smooth_batch)/(soft_jaccard_denominator_sum+smooth_batch)
             hard_jaccard_batch = (hard_jaccard_numerator_sum+smooth_batch)/(hard_jaccard_denominator_sum+smooth_batch)
             
-            dice_loss_op    = 1. - soft_dice_batch;
-            jaccard_loss_op = 1. - soft_jaccard_batch;
-        tf.summary.scalar('soft_dice_loss', dice_loss_op)
-        tf.summary.scalar('soft_jaccard_loss', jaccard_loss_op)
-        tf.summary.scalar('hard_dice_batch', hard_dice_batch)
-        tf.summary.scalar('hard_jaccard_batch', hard_jaccard_batch)
+            specific_dice_batch = tf.cond(n_ab > 0., lambda: specific_dice_sum/n_ab, lambda: tf.constant(0.)) 
+            specific_jaccard_batch = tf.cond(n_ab > 0., lambda: specific_jaccard_sum/n_ab, lambda: tf.constant(0.)) 
+
+            dice_loss_op    = 1. - soft_dice_batch
+            jaccard_loss_op = 1. - soft_jaccard_batch
+            specific_dice_loss_op = 1. - specific_dice_batch
+            specific_jaccard_loss_op = 1. - specific_jaccard_batch
+
+            # Register these quantities in the Tensorboard output
+            tf.summary.scalar('soft_dice_loss', dice_loss_op)
+            tf.summary.scalar('soft_jaccard_loss', jaccard_loss_op)
+            tf.summary.scalar('hard_dice_batch', hard_dice_batch)
+            tf.summary.scalar('hard_jaccard_batch', hard_jaccard_batch)
+            tf.summary.scalar('specific_dice_batch',specific_dice_batch)
+            tf.summary.scalar('specific_dice_loss',specific_dice_loss_op)
 
         # Training Op
         with tf.name_scope("training"):
@@ -542,21 +559,34 @@ def train():
             elif(FLAGS.loss_function == "jaccard"):
                 loss_fn = jaccard_loss_op
                 loss_avg = jaccard_loss_op
+            elif(FLAGS.loss_function == "specific_dice"):
+                loss_fn = specific_dice_loss_op
+                loss_avg = specific_dice_loss_op
             else:
                 sys.exit("Invalid loss function");
+
+            t_vars = tf.trainable_variables()
+            
+            if (FLAGS.l2_weight != 0.):
+              l2_loss = FLAGS.l2_weight * tf.add_n([tf.nn.l2_loss(var) for var in t_vars)])
+              l2_grad = optimizer.compute_gradients(l2_loss)
+              loss_fn = loss_fn + l2_loss
+              tf.summary.scalar('l2_loss',specific_dice_loss_op)
+            
+            tf.summary.scalar('loss_fn',loss_fn)
 
             # train on single batch, unused
             #train_op = optimizer.minimize(
             #    loss = loss_fn,
             #    global_step=global_step)
 
-            t_vars = tf.trainable_variables()
             
             # create a copy of all trainable variables with `0` as initial values
             accum_tvars = [tf.Variable(tf.zeros_like(t_var.initialized_value()),trainable=False) for t_var in t_vars]                                        
             # create a op to initialize all accums vars
             zero_op = [t_var.assign(tf.zeros_like(t_var)) for t_var in accum_tvars]
             
+
             # compute gradients for a batch
             if FLAGS.loss_function in ['ce','wce','dwce']:
               # The Cross-Entropies are just simple sums across voxels,
@@ -564,9 +594,22 @@ def train():
               batch_grads_vars = optimizer.compute_gradients(loss_fn, t_vars)
               # Opperation to accumulate the gradients
               accum_op = [accum_tvars[i].assign_add(batch_grad_var[0]) for i, batch_grad_var in enumerate(batch_grads_vars)]
+              compute_gradient_op = []
               # Operation to apply the accumulated gradients
+            elif FLAGS.loss_function == 'specific_dice':
+              # g_i: the gradient of the Dice metric for the i'th sample
+              g_i = optimizer.compute_gradients(1. - specific_dice_op)
+              accum_op = [specific_dice_gsum[j].assign_add(g_i[j][0]) for j in range(len(g_i))]
+              zero_op += [specific_dice_gsum_j.assign(tf.zeros_like(specific_dice_gsum_j)) for specific_dice_gsum_j in specific_dice_gsum]
+
+              compute_gradient_op = []
+              for j in range(len(t_vars)):
+                compute_gradient_op += [accum_tvars[j].assign(specific_dice_gsum[j]) ]
+                if (FLAGS.l2_weight != 0.):
+                  compute_gradient_op += [accum_tvars[j].assign_add( l2_grad[j]) ]
+              
             elif FLAGS.loss_function == 'dice':
-              # The Dice and Jaccard scores should be evaluated across the voxels of all the samples in the batch.
+              # The Dice and Jaccard scores are evaluated across the voxels of all the samples in the batch.
               # To get the gradient of that thing, we need to sum the gradient of the numerator and denominator 
               # of the Dice (Jaccard) score over the batch samples.
               # num_g_i: the gradient of the numerator term for the i'th sample
@@ -581,7 +624,7 @@ def train():
 
               compute_gradient_op = []
               for j in range(len(t_vars)):
-                compute_gradient_op += [accum_tvars[j].assign( (soft_dice_numerator_sum * soft_denominator_gsum[j] - soft_dice_denominator_sum * soft_numerator_gsum[j]) / (soft_dice_denominator_sum*soft_dice_denominator_sum)) ]
+                compute_gradient_op += [accum_tvars[j].assign( ((soft_dice_numerator_sum+smooth_batch) * soft_denominator_gsum[j] - (soft_dice_denominator_sum+smooth_batch) * soft_numerator_gsum[j]) / ((soft_dice_denominator_sum+smooth_batch)*(soft_dice_denominator_sum+smooth_batch))) ]
 
             elif FLAGS.loss_function == 'jaccard':
               num_g_i   = optimizer.compute_gradients(soft_jaccard_numerator_op, t_vars)
@@ -596,6 +639,9 @@ def train():
               for j in range(len(t_vars)):
                 compute_gradient_op += [accum_tvars[j].assign( (soft_jaccard_numerator_sum * soft_denominator_gsum[j] - soft_jaccard_denominator_sum * soft_numerator_gsum[j]) / (soft_jaccard_denominator_sum*soft_jaccard_denominator_sum)) ]
 
+            if (FLAGS.l2_weight != 0.):
+              for j in range(len(t_vars)):
+                compute_gradient_op += [accum_tvars[j].assign_add( l2_grad[j]) ]
             
             #apply_gradients_op = optimizer.apply_gradients([(accum_tvars[i] / n_ab, batch_grad_var[1]) for i, batch_grad_var in enumerate(batch_grads_vars)], global_step=global_step)
             apply_gradients_op = optimizer.apply_gradients([(accum_tvars[i], t_vars[i]) for i in range(len(t_vars))], global_step=global_step)
@@ -619,6 +665,9 @@ def train():
             sum_zero_op += [soft_dice_denominator_sum.assign(tf.zeros_like(soft_dice_denominator_sum))]
             sum_zero_op += [soft_jaccard_numerator_sum.assign(tf.zeros_like(soft_jaccard_numerator_sum))]
             sum_zero_op += [soft_jaccard_denominator_sum.assign(tf.zeros_like(soft_jaccard_denominator_sum))]
+            
+            sum_zero_op += [specific_dice_sum.assign(tf.zeros_like(specific_dice_sum))]
+            sum_zero_op += [specific_jaccard_sum.assign(tf.zeros_like(specific_jaccard_sum))]
 
             sum_accum_op = [n_ab.assign_add(1.)]
 
@@ -636,6 +685,8 @@ def train():
             sum_accum_op += [soft_dice_denominator_sum.assign_add(soft_dice_denominator_op)]
             sum_accum_op += [soft_jaccard_numerator_sum.assign_add(soft_jaccard_numerator_op)]
             sum_accum_op += [soft_jaccard_denominator_sum.assign_add(soft_jaccard_denominator_op)]
+            sum_accum_op += [specific_dice_sum.assign_add(specific_dice_op)]
+            sum_accum_op += [specific_jaccard_sum.assign_add(specific_jaccard_op)]
 
         # # epoch checkpoint manipulation
         start_epoch = tf.get_variable("start_epoch", shape=[1], initializer= tf.zeros_initializer,dtype=tf.int32)
@@ -723,12 +774,11 @@ def train():
                   n_train = int(sess.run(n_ab))
 
                   logger.debug("Applying gradients after total %d accumulations"%n_train)
-                  if FLAGS.loss_function in ['dice','jaccard']:
+                  #if FLAGS.loss_function in ['dice','jaccard','specific_dice']:
+                  if (compute_gradient_op != [])
                     sess.run(compute_gradient_op)
                   sess.run(apply_gradients_op)
                   
-                  #num, den = sess.run([soft_dice_numerator_sum,soft_dice_denominator_sum])
-                  #logger.debug("num=%.3f, den=%.3f"%(num,den))
                   
                   logger.debug('Applying summary op')
                   summary = sess.run(summary_op)
@@ -739,7 +789,7 @@ def train():
                   # I don't think we should really do this?
                   if True:#n_train % (n_accum_crops) != 0:
                     logger.debug("Applying gradients after total %d accumulations"%n_train)
-                    if FLAGS.loss_function in ['dice','jaccard']:
+                    if FLAGS.loss_function in ['dice','jaccard','specific_dice']:
                       sess.run(compute_gradient_op)
                     sess.run(apply_gradients_op)
                     summary = sess.run(summary_op)
@@ -747,16 +797,6 @@ def train():
                   
                   # Compute the average training loss across all batches in the epoch.
                   train_loss_avg = sess.run(loss_avg)
-                  #if (FLAGS.loss_function == "ce"):
-                  #  train_loss_avg = sess.run(ce_avg)
-                  #elif(FLAGS.loss_function == "wce"):
-                  #  train_loss_avg = sess.run(wce_avg)
-                  #elif(FLAGS.loss_function == "dwce"):
-                  #  train_loss_avg = sess.run(dwce_avg)
-                  #elif(FLAGS.loss_function == "dice"):
-                  #  train_loss_avg = sess.run(dice_loss_op)
-                  #elif(FLAGS.loss_function == "jaccard"):
-                  #  train_loss_avg = sess.run(jaccard_loss_op)
                   
                   print("{0}: Average training loss is {1:.3f} over {2:d}".format(datetime.datetime.now(), train_loss_avg, n_train))
                   start_epoch_inc.op.run()
@@ -808,6 +848,8 @@ def train():
                     test_loss_avg = sess.run(dice_loss_op)
                   elif(FLAGS.loss_function == "jaccard"):
                     test_loss_avg = sess.run(jaccard_loss_op)
+                  elif(FLAGS.loss_function == "specific_dice"):
+                    test_loss_avg = sess.run(specific_dice_loss_op)
 
                   n_test = int(sess.run(n_ab))
                   print("{0}: Average testing loss is {1:.3f} over {2:d}".format(datetime.datetime.now(), test_loss_avg, n_test))

@@ -49,7 +49,7 @@ class NiftiDataset(object):
 
     dataset = dataset.shuffle(buffer_size=len(cases))
     dataset = dataset.map(lambda image_path, label_path: tuple(tf.py_func(
-      self.input_parser, [image_path, label_path], [tf.float32,tf.int32])), num_parallel_calls=4)
+      self.input_parser, [image_path, label_path], [tf.float32,tf.int32])), num_parallel_calls=16)
 
     self.dataset = dataset
     self.data_size = len(image_paths)
@@ -117,7 +117,7 @@ class NiftiDataset(object):
     images_np=[]
     labels_np=[]
     for multiple_crops in range(0,self.num_crops):
-      sample_tfm = sample
+      sample_tfm = {'image': itkImages3d.copy(), 'label':label}
       if self.transforms:
         for transform in self.transforms:
           sample_tfm = transform(sample_tfm)
@@ -748,4 +748,38 @@ class ThresholdCrop(object):
     croppedImage = [sitk.RegionOfInterest(volume, bounding_box[int(len(bounding_box)/2):], bounding_box[0:int(len(bounding_box)/2)]) for volume in image]
     croppedLabel = sitk.RegionOfInterest(label, bounding_box[int(len(bounding_box)/2):], bounding_box[0:int(len(bounding_box)/2)])
     return {'image': croppedImage, 'label': croppedLabel}
+
+
+class RandomFlip(object):
+  """
+  Flip an image about randomly chosen axes.
+  flip_prob: chance to flip about a given axis
+  flip_axes: the axes about which you want a chance to flip
+
+  Note: Not sure right now if [0,1,2]<=>[x,y,z] or [z,y,x]
+  """
+  def __init__(self, flip_prob=0.5, flip_axes=[0,1,2]):
+    self.name = 'RandomFlip'
+    assert isinstance(flip_prob, (float))
+    self.flip_prob = flip_prob
+    assert isinstance(flip_axes, (list))
+    self.flip_axes = axes
+
+  def __call__(self, sample):
+    
+    # Choose axes to flip
+    chosen_flip_axes = []
+    for axis in flip_axes:
+      if (random.random() > self.flip_prob):
+        chosen_flip_axes.append(axis)
+    
+    if len(chosen_flip_axes) == 0:
+      return sample
+    
+    image, label = sample['image'], sample['label']
+    fif = sitk.FlipImageFilter()
+    fif.SetFlipAxes(chosen_flip_axes)
+    flippedImage = fif.Execute(image)
+    flippedLabel = fif.Execute(label)
+    return {'image': flippedImage, 'label': flippedLabel}
 

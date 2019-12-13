@@ -91,7 +91,7 @@ def evaluate():
     # create transformations to image and labels
     transforms = [
         # NiftiDataset.Normalization(),
-        NiftiDataset.StatisticalNormalization(3.0,3.0,nonzero_only=True),
+        NiftiDataset.StatisticalNormalization(5.0,5.0,nonzero_only=True),
         #NiftiDataset.Resample(0.75),
         #NiftiDataset.Padding((FLAGS.patch_size, FLAGS.patch_size, FLAGS.patch_layer))      
         ]
@@ -162,6 +162,7 @@ def evaluate():
                 true_label_tfm = true_sample['label']
 
                 # create empty softmax image in pair with transformed image
+                #softmax_tfm = sitk.Image(label_dims,sitk.sitkFloat32)
                 softmax_tfm = sitk.Image(label_dims,sitk.sitkFloat32)
                 softmax_tfm.SetOrigin(tfmItkImages3d[0].GetOrigin())
                 softmax_tfm.SetDirection(image.GetDirection())
@@ -312,8 +313,8 @@ def evaluate():
                 #prob = resampler.Execute(softmax_tfm)
                 prob = softmax_tfm
                 prob_path = os.path.join(FLAGS.data_dir,case,'probability_vnet%s.nii.gz'%FLAGS.suffix)
-                #writer.SetFileName(prob_path)
-                #writer.Execute(prob)
+                writer.SetFileName(prob_path)
+                writer.Execute(prob)
                 print("{}: Save evaluate probability map at {} success".format(datetime.datetime.now(),prob_path))
 
                 ccFilter = sitk.ConnectedComponentImageFilter()
