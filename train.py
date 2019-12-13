@@ -265,7 +265,7 @@ def train():
             trainDataset = TrainDataset.get_dataset()
             # Here there are batches of size num_crops, unbatch and shuffle
             trainDataset = trainDataset.apply(tf.contrib.data.unbatch())
-            trainDataset = trainDataset.repeat(3) 
+            #trainDataset = trainDataset.repeat(3) 
             trainDataset = trainDataset.batch(FLAGS.batch_size)
             trainDataset = trainDataset.prefetch(5)
             #trainDataset = trainDataset.apply(tf.contrib.data.prefetch_to_device('/gpu:0'))
@@ -814,6 +814,8 @@ def train():
                   logger.error("Terminating due to exceeded memory limit. I am justly killed with mine own treachery!")
                   sys.exit(1)
               
+              print('profile\n',TrainDataset.profile)
+
               # testing phase
               print("{}: Training of epoch {} finishes, testing start".format(datetime.datetime.now(),epoch+1))
               #test_loss_avg = 0.0

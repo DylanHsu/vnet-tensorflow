@@ -4,6 +4,7 @@ import os
 import numpy as np
 import math
 import random
+import time
 
 class NiftiDataset(object):
   """
@@ -37,6 +38,11 @@ class NiftiDataset(object):
     self.train = train
     self.num_crops = num_crops
     self.peek_dir = peek_dir
+
+    self.profile = {}
+    if self.transforms:
+      for transform in self.transforms:
+        self.profile[type(transform)] = 0.0
   def get_dataset(self):
     image_paths = []
     label_paths = []
@@ -117,7 +123,11 @@ class NiftiDataset(object):
       sample_tfm = {'image': itkImages3d.copy(), 'label':label}
       if self.transforms:
         for transform in self.transforms:
+          t1=time.process_time()
           sample_tfm = transform(sample_tfm)
+          t2=time.process_time()
+          self.profile[type(transform)] += (t2-t1)
+
       
       # If we are peeking, write the images to the directory
       if self.peek_dir != '':
@@ -628,7 +638,8 @@ class BSplineDeformation(object):
     bspline.SetTransformDomainOrigin(image[0].GetOrigin())
     bspline.SetTransformDomainDirection(image[0].GetDirection())
     bspline.SetTransformDomainPhysicalDimensions(domain_physical_dimensions)
-    bspline.SetTransformDomainMeshSize((10,10,10))
+    #bspline.SetTransformDomainMeshSize((10,10,10))
+    bspline.SetTransformDomainMeshSize((3,3,3))
 
     # Random displacement of the control points.
     originalControlPointDisplacements = np.random.random(len(bspline.GetParameters()))*self.randomness
@@ -795,7 +806,7 @@ class RandomHistoMatch(object):
     assert isinstance(data_dir, str)
     self.data_dir = data_dir
     assert isinstance(image_filename, str)
-    self.image_filename = data_dir
+    self.image_filename = image_filename
     assert isinstance(match_prob, float)
     self.match_prob = match_prob
     cases = os.listdir(self.data_dir)
@@ -804,7 +815,7 @@ class RandomHistoMatch(object):
       self.image_paths.append(os.path.join(self.data_dir,case,self.image_filename))
 
   def __call__(self, sample):
-    if (random.random() <= self.match_prob):
+    if (random.random() > self.match_prob):
       return sample
     
     image, label = sample['image'], sample['label']
