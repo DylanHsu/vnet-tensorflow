@@ -225,31 +225,23 @@ def train():
             trainTransforms = [
                 NiftiDataset.RandomHistoMatch(train_data_dir, FLAGS.image_filename, 1.0),
                 NiftiDataset.StatisticalNormalization(5.0, 5.0, nonzero_only=True),
+                NiftiDataset.BSplineDeformation(),
+                NiftiDataset.RandomCrop((FLAGS.patch_size, FLAGS.patch_size, FLAGS.patch_layer),FLAGS.drop_ratio,FLAGS.min_pixel),
+                NiftiDataset.RandomNoise(),
+                NiftiDataset.RandomFlip(0.5, [True,True,True]),
+                
                 #NiftiDataset.ThresholdCrop(),
                 #NiftiDataset.RandomRotation(maxRot = 0.08727), # 5 degrees maximum
                 #NiftiDataset.RandomRotation(maxRot = 10*0.01745), 
                 #NiftiDataset.ThresholdCrop(),
                 #NiftiDataset.Padding((FLAGS.patch_size, FLAGS.patch_size, FLAGS.patch_layer)),
-                NiftiDataset.BSplineDeformation(),
                 #NiftiDataset.ConfidenceCrop((FLAGS.patch_size,FLAGS.patch_size,FLAGS.patch_layer), FLAGS.ccrop_sigma),
-                NiftiDataset.RandomCrop((FLAGS.patch_size, FLAGS.patch_size, FLAGS.patch_layer),FLAGS.drop_ratio,FLAGS.min_pixel),
-                NiftiDataset.RandomNoise(),
-                NiftiDataset.RandomFlip(0.5, [True,True,True]),
                 # NiftiDataset.Normalization(),
                 #NiftiDataset.Resample((0.45,0.45,0.45)),
                 ]
             testTransforms = [
                 NiftiDataset.StatisticalNormalization(5.0, 5.0, nonzero_only=True),
-                #NiftiDataset.ThresholdCrop(),
-                #NiftiDataset.RandomCrop((FLAGS.patch_size, FLAGS.patch_size, FLAGS.patch_layer),0.5,FLAGS.min_pixel)
-                #NiftiDataset.RandomCrop((FLAGS.patch_size, FLAGS.patch_size, FLAGS.patch_layer),FLAGS.drop_ratio,FLAGS.min_pixel)
-                #NiftiDataset.Padding((FLAGS.patch_size, FLAGS.patch_size, FLAGS.patch_layer)),
                 NiftiDataset.RandomCrop((FLAGS.patch_size, FLAGS.patch_size, FLAGS.patch_layer),0,20),
-                #NiftiDataset.ConfidenceCrop((FLAGS.patch_size,FLAGS.patch_size,FLAGS.patch_layer), FLAGS.ccrop_sigma),
-                #NiftiDataset.ConfidenceCrop((FLAGS.patch_size,FLAGS.patch_size,FLAGS.patch_layer), 0.5),
-                # NiftiDataset.Normalization(),
-                #NiftiDataset.Resample((0.45,0.45,0.45)),
-                #NiftiDataset.Padding((FLAGS.patch_size, FLAGS.patch_size, FLAGS.patch_layer)),
                 ]
             
             TrainDataset = NiftiDataset.NiftiDataset(
@@ -265,18 +257,11 @@ def train():
             trainDataset = TrainDataset.get_dataset()
             # Here there are batches of size num_crops, unbatch and shuffle
             trainDataset = trainDataset.apply(tf.contrib.data.unbatch())
-            #trainDataset = trainDataset.repeat(3) 
+            trainDataset = trainDataset.repeat(3) 
             trainDataset = trainDataset.batch(FLAGS.batch_size)
             trainDataset = trainDataset.prefetch(5)
             #trainDataset = trainDataset.apply(tf.contrib.data.prefetch_to_device('/gpu:0'))
 
-            #testTransforms = [
-            #    NiftiDataset.StatisticalNormalization(2.5),
-            #    # NiftiDataset.Normalization(),
-            #    NiftiDataset.Resample((0.45,0.45,0.45)),
-            #    NiftiDataset.Padding((FLAGS.patch_size, FLAGS.patch_size, FLAGS.patch_layer)),
-            #    NiftiDataset.RandomCrop((FLAGS.patch_size, FLAGS.patch_size, FLAGS.patch_layer),FLAGS.drop_ratio,FLAGS.min_pixel)
-            #    ]
 
             TestDataset = NiftiDataset.NiftiDataset(
                 data_dir=test_data_dir,
@@ -572,7 +557,7 @@ def train():
               l2_loss = FLAGS.l2_weight * tf.add_n( [tf.nn.l2_loss(var) for var in t_vars])
               l2_grad = optimizer.compute_gradients(l2_loss)
               loss_fn = loss_fn + l2_loss
-              tf.summary.scalar('l2_loss',specific_dice_loss_op)
+              tf.summary.scalar('l2_loss', l2_loss)
             
             tf.summary.scalar('loss_fn',loss_fn)
 

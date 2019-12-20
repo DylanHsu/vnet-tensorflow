@@ -55,7 +55,7 @@ class NiftiDataset(object):
 
     dataset = dataset.shuffle(buffer_size=len(cases))
     dataset = dataset.map(lambda image_path, label_path: tuple(tf.py_func(
-      self.input_parser, [image_path, label_path], [tf.float32,tf.int32])), num_parallel_calls=16)
+      self.input_parser, [image_path, label_path], [tf.float32,tf.int32])), num_parallel_calls=4)
 
     self.dataset = dataset
     self.data_size = len(image_paths)
@@ -638,8 +638,7 @@ class BSplineDeformation(object):
     bspline.SetTransformDomainOrigin(image[0].GetOrigin())
     bspline.SetTransformDomainDirection(image[0].GetDirection())
     bspline.SetTransformDomainPhysicalDimensions(domain_physical_dimensions)
-    #bspline.SetTransformDomainMeshSize((10,10,10))
-    bspline.SetTransformDomainMeshSize((3,3,3))
+    bspline.SetTransformDomainMeshSize((10,10,10))
 
     # Random displacement of the control points.
     originalControlPointDisplacements = np.random.random(len(bspline.GetParameters()))*self.randomness
