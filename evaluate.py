@@ -21,6 +21,8 @@ tf.app.flags.DEFINE_string('data_dir','./data/evaluate',
     """Directory of evaluation data""")
 tf.app.flags.DEFINE_string('image_filename','img.nii.gz',
     """Image filename""")
+tf.app.flags.DEFINE_string('label_filename','label.nii.gz',
+    """Label filename""")
 tf.app.flags.DEFINE_string('model_path','./tmp/ckpt/checkpoint-2240.meta',
     """Path to saved models""")
 tf.app.flags.DEFINE_string('checkpoint_path','./tmp/ckpt/checkpoint-2240',
@@ -111,7 +113,7 @@ def evaluate():
 
             # check image data exists
             image_path = os.path.join(FLAGS.data_dir,case,FLAGS.image_filename)
-            true_label_path = os.path.join(FLAGS.data_dir,case,'label.nii.gz') #hack
+            true_label_path = os.path.join(FLAGS.data_dir,case,FLAGS.label_filename) #hack
 
             if not os.path.exists(image_path):
                 print("{}: Image file not found at {}".format(datetime.datetime.now(),image_path))
@@ -344,8 +346,10 @@ def evaluate():
                   if (labelShapeFilter.GetNumberOfPixels(j) * cubicMmPerVoxel) < 25.:
                     nonartifacts.remove(j)
                 
-                falsePositives=list(range(1,trueLabelShapeFilter.GetNumberOfLabels()+1))
-                falseNegatives = nonartifacts 
+                #falsePositives=list(range(1,trueLabelShapeFilter.GetNumberOfLabels()+1))
+                #falseNegatives = nonartifacts 
+                falseNegatives=list(range(1,trueLabelShapeFilter.GetNumberOfLabels()+1))
+                falsePositives = nonartifacts 
                 mif=sitk.LabelMapMaskImageFilter()
                 if labelShapeFilter.GetNumberOfLabels()<=5000:
                   f_specificDice = open(os.path.join(FLAGS.data_dir,case,'specificDice%s.txt'%FLAGS.suffix), 'w')
@@ -367,7 +371,62 @@ def evaluate():
                       falseNegatives.remove(i)
                     statFilter.Execute(true_lesion)
                     volumetric_d = ((cubicMmPerVoxel * 6.*statFilter.GetSum()/3.14159) ** (1./3.))
-                    f_specificDice.write("%s %d %.2f %.3f\n"%(case, i, volumetric_d, specific_dice))
+                    # difficulty calculation using TRUE label
+                    # instantiate filters
+                    castImageFilter       = sitk.CastImageFilter()
+                    roiFilter             = sitk.RegionOfInterestImageFilter()
+
+                    true_lesion_np = np.transpose(sitk.GetArrayFromImage(true_lesion),(1,2,0))
+                    nhd_size=(64,64,32)
+                    roiFilter.SetSize(nhd_size)
+
+                    centroid = list(true_label.TransformPhysicalPointToIndex(trueLabelShapeFilter.GetCentroid(i)))
+
+                    start=[-1,-1,-1]
+                    end=[-1,-1,-1] 
+                    for dim in range(3):
+                      if centroid[dim] < nhd_size[dim]/2:
+                        centroid[dim] = int(nhd_size[dim]/2)
+                      elif true_label.GetSize()[dim] - centroid[dim] < nhd_size[dim]/2:
+                        centroid[dim] = true_label.GetSize()[dim] - int(nhd_size[dim]/2) - 1
+                      
+                      start[dim] = centroid[dim] - int(nhd_size[dim]/2)
+                      end[dim]   = start[dim] + nhd_size[dim] - 1
+                    roiFilter.SetIndex(start)
+                    castImageFilter.SetOutputPixelType(sitk.sitkFloat32)
+                    
+                    roiFilter.SetIndex(start)
+                    croppedLabel = roiFilter.Execute(true_label)
+                    croppedLabel_np = np.transpose(sitk.GetArrayFromImage(croppedLabel),(1,2,0))
+                    nhd_mean = 0.
+                    lesion_mean = 0.
+                    lesion_volume = -1
+                    threshold = 0.001
+                    for volume in sample['image']:
+                      croppedImage = roiFilter.Execute(volume)
+                      croppedImage_np = np.transpose(sitk.GetArrayFromImage(croppedImage),(1,2,0))
+                      nhd_voxels = croppedImage_np[croppedLabel_np <= threshold] # non lesion voxels
+                      nhd_mean += np.mean(nhd_voxels)
+                      
+                      image_np = np.transpose(sitk.GetArrayFromImage(volume),(1,2,0))
+                      lesion_voxels = croppedImage_np[croppedLabel_np > threshold] 
+                      lesion_mean += np.mean(lesion_voxels)
+                      # compute lesion volume only once
+                      if lesion_volume == -1:
+                        lesion_volume = len(lesion_voxels)
+                        q90 = np.quantile(lesion_voxels,0.9)
+                        q10 = np.quantile(lesion_voxels,0.1)
+                    nhd_mean = nhd_mean / float(len(sample['image']))
+                    lesion_mean = lesion_mean / float(len(sample['image']))
+                    #intensity_balance = abs(lesion_mean/nhd_mean - 1.)
+                    #inverse_balance = 1./intensity_balance
+                    intensity_balance = lesion_mean/nhd_mean - 1.
+                    q90_balance = q90/nhd_mean - 1.
+                    q10_balance = q10/nhd_mean - 1.
+                    #print("nhd_mean = %.3f, q10 = %.3f, q90 = %.3f"%(nhd_mean,q10,q90))
+
+                    #f_specificDice.write("%s %d %.2f %.4f %.3f\n"%(case, i, volumetric_d, inverse_balance, specific_dice))
+                    f_specificDice.write("%s %d %.2f %.4f %.4f %.4f %.3f\n"%(case, i, volumetric_d, intensity_balance, q10_balance, q90_balance, specific_dice))
                   f_specificDice.close()
                 
                 f_dice = open(os.path.join(FLAGS.data_dir,case,'dice%s.txt'%FLAGS.suffix), 'w')

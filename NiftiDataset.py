@@ -188,7 +188,7 @@ class StatisticalNormalization(object):
   Normalize an image by mapping intensity with intensity distribution
   """
 
-  def __init__(self, sigmaUp, sigmaDown, nonzero_only=False):
+  def __init__(self, sigmaUp, sigmaDown, nonzero_only=False, zero_floor=False):
     self.name = 'StatisticalNormalization'
     #assert isinstance(nSigma, float)
     #self.nSigma = nSigma
@@ -198,6 +198,7 @@ class StatisticalNormalization(object):
     self.sigmaUp = sigmaUp
     self.sigmaDown = sigmaDown
     self.nonzero_only = nonzero_only
+    self.zero_floor = zero_floor
     self.threshold = 0.01
 
   def __call__(self, sample):
@@ -235,8 +236,10 @@ class StatisticalNormalization(object):
         mean = statisticsFilter.GetMean()
 
       intensityWindowingFilter.SetWindowMaximum(mean + self.sigmaUp * sigma)
-      #intensityWindowingFilter.SetWindowMinimum(max(self.threshold, mean - self.sigmaDown * sigma))
-      intensityWindowingFilter.SetWindowMinimum(mean - self.sigmaDown * sigma)
+      if self.zero_floor:
+        intensityWindowingFilter.SetWindowMinimum(max(0, mean - self.sigmaDown * sigma))
+      else:
+        intensityWindowingFilter.SetWindowMinimum(mean - self.sigmaDown * sigma)
       
       normalizedImage[i] = intensityWindowingFilter.Execute(volume)
     return {'image': normalizedImage, 'label': label}
@@ -702,7 +705,7 @@ class RandomRotation(object):
     resampler = sitk.ResampleImageFilter()
     # Perform the interpolation
     image_size = image[0].GetSize()
-    reference_size = tuple([math.ceil(i*1.2) for i in list(image_size)])
+    reference_size = tuple([math.ceil(i*1.5) for i in list(image_size)])
     resampler.SetOutputSpacing(image[0].GetSpacing())
     resampler.SetSize(reference_size)
     resampler.SetInterpolator(sitk.sitkLinear)
@@ -742,7 +745,7 @@ class ThresholdCrop(object):
       composite_image = dif.Execute(composite_image, len(image))
 
     castImageFilter = sitk.CastImageFilter()
-    castImageFilter.SetOutputPixelType(sitk.sitkInt16)
+    castImageFilter.SetOutputPixelType(sitk.sitkFloat32)
     composite_image = aif.Execute(composite_image, castImageFilter.Execute(label))
         
     # Set pixels that are in [min_intensity,otsu_threshold] to inside_value, values above otsu_threshold are
@@ -828,7 +831,7 @@ class RandomHistoMatch(object):
     reader.SetFileName(target_path) 
     target_image = reader.Execute()
     castImageFilter = sitk.CastImageFilter()
-    castImageFilter.SetOutputPixelType(sitk.sitkInt16)
+    castImageFilter.SetOutputPixelType(sitk.sitkFloat32)
     target_images_3d = []
     if len(target_image.GetSize()) == 3: # 3D image
       target_image_3d = castImageFilter.Execute(target_image)
@@ -844,6 +847,9 @@ class RandomHistoMatch(object):
         target_image_3d = castImageFilter.Execute(target_image_3d)
         target_images_3d += [target_image_3d]
 
+
+
+    
     # Match the images in the sample to the images in the target
     assert len(image) == len(target_images_3d), 'Source and target for matching have different dimensions'
     histoMatchFilter = sitk.HistogramMatchingImageFilter()
@@ -852,13 +858,160 @@ class RandomHistoMatch(object):
     
     matchedImage = []
     
+    btif = sitk.BinaryThresholdImageFilter()
+    mif = sitk.MaskImageFilter()
     for i in range(len(image)):
-      volume = image[i]
+      castImageFilter.SetOutputPixelType(sitk.sitkFloat32)
+      volume = castImageFilter.Execute(image[i])
       target_volume = target_images_3d[i]
       volume_matched = histoMatchFilter.Execute( volume, target_volume )
+      # Apply mask of nonzero voxels to preserve zero/nonzero dichotomy 
+      #castImageFilter.SetOutputPixelType(sitk.sitkInt16)
+      #nonzeroMask = castImageFilter.Execute((btif.Execute(volume, 0.01, 1e15, 1, 0)))
+      #volume_matched = mif.Execute(volume_matched, nonzeroMask, 0, 0)
       matchedImage.append(volume_matched)
 
     return {'image': matchedImage, 'label': label}
+
+class DifficultyIndex(object):
+  """
+  Compute a map of the "difficulty" of finding the label's connected
+  components, based on its dimensions and the image intensities
+  in the CC versus its neighborhood.
+  The label will no longer be integers.
+  This should be called prior to any cropping so the full geometric
+  information of the labels and their surroundings is available.
+  For multi-volume images, this is best done after statistical normalization,
+  to aid the intensity balancing calculation.
+
+  nhd_size: int or tuple representing the neighborhood size for the
+    intensity calculation
+  kD: weight of the volumetric diameter term
+  kI: weight of the intensity balancing term
+  """
+  def __init__(self, nhd_size, kD=5.0, kI=1.0):
+    self.name = 'DifficultyIndex'
+    assert isinstance(nhd_size, (int, tuple))
+    if isinstance(nhd_size, int):
+      self.nhd_size = (nhd_size, nhd_size, nhd_size)
+    else:
+      assert len(nhd_size) == 3
+      self.nhd_size = nhd_size
+    
+    assert isinstance(kD, float)
+    self.kD = kD
+    assert isinstance(kI, float)
+    self.kI = kI
+    
+    self.threshold = 0.001 # threshold for the nonzero voxels
+  def __call__(self, sample):
+    image, label = sample['image'], sample['label']
+
+    # instantiate filters
+    addImageFilter        = sitk.AddImageFilter()
+    castImageFilter       = sitk.CastImageFilter()
+    ccFilter              = sitk.ConnectedComponentImageFilter()
+    labelShapeFilter      = sitk.LabelShapeStatisticsImageFilter()
+    mapFilter             = sitk.LabelImageToLabelMapFilter()
+    maskImageFilter       = sitk.LabelMapMaskImageFilter()
+    roiFilter             = sitk.RegionOfInterestImageFilter()
+    statisticsImageFilter = sitk.StatisticsImageFilter()
+    multiplyImageFilter   = sitk.MultiplyImageFilter()
+
+    roiFilter.SetSize(self.nhd_size)
+    castImageFilter.SetOutputPixelType(sitk.sitkFloat32)
+    
+    # Compute the mean intensity value of the image
+    # This is computed over all volumes of the image, which
+    # might be problematic for multiple volumes with different intensities.
+    mean = 0.
+    for volume in image:
+      image_np = np.transpose(sitk.GetArrayFromImage(volume),(1,2,0))
+      nonzero_voxels = (image_np > self.threshold)
+      arr_nonzero = image_np[nonzero_voxels]
+      mean += np.mean(arr_nonzero)
+      # No stdev calculation for right now
+    mean = mean / float(len(image))
+
+    # compute connected components of the label
+    labelCC = ccFilter.Execute(label)
+    labelShapeFilter.Execute(labelCC)
+    # create a SimpleITK label map from the connected components
+    # this is needed to mask specific CC's
+    labelMap=mapFilter.Execute(labelCC,0)
+
+    # Create an image with floating point values in the
+    # geometry of the original label. The values will be the
+    # difficulty indices of the connected components
+    weightedLabel = sitk.Image(label.GetSize(), sitk.sitkFloat32)
+    weightedLabel.SetOrigin(label.GetOrigin())
+    weightedLabel.SetSpacing(label.GetSpacing())
+    weightedLabel.SetDirection(label.GetDirection())
+    
+    # Loop over all the lesions in this label
+    for i in range(1,labelShapeFilter.GetNumberOfLabels()+1):
+      # Get a binary mask for only this lesion
+      maskImageFilter.SetLabel(i)
+      lesion = maskImageFilter.Execute(labelMap, label)
+      
+      # From this binary mask, compute the mean 
+      lesion_np = np.transpose(sitk.GetArrayFromImage(lesion),(1,2,0))
+      
+      # neighborhood calculation
+      centroid = list(label.TransformPhysicalPointToIndex(labelShapeFilter.GetCentroid(i)))
+      start=[-1,-1,-1]
+      end=[-1,-1,-1] 
+      for dim in range(3):
+        if centroid[dim] < self.nhd_size[dim]/2:
+          centroid[dim] = int(self.nhd_size[dim]/2)
+        elif label.GetSize()[dim] - centroid[dim] < self.nhd_size[dim]/2:
+          centroid[dim] = label.GetSize()[dim] - int(self.nhd_size[dim]/2) - 1
+        
+        start[dim] = centroid[dim] - int(self.nhd_size[dim]/2)
+        end[dim]   = start[dim] + self.nhd_size[dim] - 1
+      roiFilter.SetIndex(start)
+      croppedLabel = roiFilter.Execute(label)
+      croppedLabel_np = np.transpose(sitk.GetArrayFromImage(croppedLabel),(1,2,0))
+      nhd_mean = 0.
+      lesion_mean = 0.
+      lesion_volume = -1
+      for volume in image:
+        croppedImage = roiFilter.Execute(volume)
+        croppedImage_np = np.transpose(sitk.GetArrayFromImage(croppedImage),(1,2,0))
+        nhd_voxels = croppedImage_np[croppedLabel_np <= self.threshold]
+        
+        image_np = np.transpose(sitk.GetArrayFromImage(volume),(1,2,0))
+        lesion_voxels = image_np[lesion_np > self.threshold] 
+        # compute lesion volume only once
+        if lesion_volume == -1:
+          lesion_volume = len(lesion_voxels)
+          q90 = np.quantile(lesion_voxels,0.9)
+          q10 = np.quantile(lesion_voxels,0.1)
+          nhd_mean = np.mean(nhd_voxels)
+          lesion_mean = np.mean(lesion_voxels)
+      #nhd_mean = nhd_mean / float(len(image))
+      #lesion_mean = lesion_mean / float(len(image))
+      if nhd_mean==0: # handle the case of an empty image (crop)
+        q90_balance = 0.
+        q10_balance = 0.
+        intensity_balance = 0. 
+      else:
+        q90_balance = q90/nhd_mean - 1.
+        q10_balance = q10/nhd_mean - 1.
+        intensity_balance = abs(lesion_mean/nhd_mean - 1.)
+      cubicMmPerVoxel = 1.
+      for dimSpacing in list(label.GetSpacing()):
+        cubicMmPerVoxel = cubicMmPerVoxel * dimSpacing
+
+      diameter = (1.909859 * float(lesion_volume) * cubicMmPerVoxel)  ** (1./3.) # (6V/pi)^(1/3)
+      
+      difficulty = self.kD * (1./diameter) + self.kI * (1. - q10_balance/2.)
+      
+      weightedLesion = castImageFilter.Execute(lesion)
+      weightedLesion = multiplyImageFilter.Execute(weightedLesion, difficulty)
+      weightedLabel = addImageFilter.Execute(weightedLabel, weightedLesion)
+
+    return {'image': image, 'label': weightedLabel}
 
 
 
