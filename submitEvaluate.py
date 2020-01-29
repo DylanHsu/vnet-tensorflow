@@ -9,19 +9,21 @@ useGpu=True
 
 jobfolder = "./jobs/"
 data_dir = '/data/deasy/DylanHsu/N200_1mm3/nifti'
-patch_size  = 64 
-patch_layer = 64 
+patch_size  = 32 
+patch_layer = 32 
 stride_inplane = 4
 stride_layer   = 4
 
+suffix='-scanSizeV1mm3-bs1000-dr0p50-32mm'
+checkpoint_path='tmp/ckpt/bak/checkpoint_n200-scanSizeV1mm3-bs1000-dr0p50-32mm-1440'
 #suffix='-scanSizeV1mm3-bs1000-dr0p50-40mm'
 #checkpoint_path='tmp/ckpt/bak/checkpoint_n200-scanSizeV1mm3-bs1000-dr0p50-40mm-1776'
 #suffix='-scanSizeV1mm3-bs1000-dr0p50-48mm'
 #checkpoint_path='tmp/ckpt/bak/checkpoint_n200-scanSizeV1mm3-bs1000-dr0p50-48mm-1200'
 #suffix='-scanSizeV1mm3-bs1000-dr0p50-56mm'
 #checkpoint_path='tmp/ckpt/bak/checkpoint_n200-scanSizeV1mm3-bs1000-dr0p50-56mm-1216'
-suffix='-scanSizeV1mm3-bs1000-dr0p50-64mm'
-checkpoint_path='tmp/ckpt/bak/checkpoint_n200-scanSizeV1mm3-bs1000-dr0p50-64mm-992'
+#suffix='-scanSizeV1mm3-bs1000-dr0p50-64mm'
+#checkpoint_path='tmp/ckpt/bak/checkpoint_n200-scanSizeV1mm3-bs1000-dr0p50-64mm-992'
 
 model_path = checkpoint_path + '.meta'
 
@@ -64,8 +66,10 @@ for case in os.listdir(data_dir):
   f.write(' --suffix %s'%suffix)
   f.write(' --case %s'%case)
   f.write(' --is_batch')
+  if not useGpu:
+    f.write(' --use_cpu')
   f.write("\n")
   f.close()
-# Submit jobs.
+  # Submit jobs.
   the_command = "bsub < " + jobfile
   os.system(the_command)

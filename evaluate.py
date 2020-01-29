@@ -11,8 +11,6 @@ import math
 import numpy as np
 from tqdm import tqdm
 
-# select gpu devices
-os.environ["CUDA_VISIBLE_DEVICES"] = "0" # e.g. "0,1,2", "0,2" 
 
 # tensorflow app flags
 FLAGS = tf.app.flags.FLAGS
@@ -43,6 +41,13 @@ tf.app.flags.DEFINE_string('case','',
     """Specific case to evaluate""")
 tf.app.flags.DEFINE_boolean('is_batch',False,
     """Disable progress bar if this is a batch job""")
+tf.app.flags.DEFINE_boolean('use_cpu',False,
+    """Decide if you want to use a GPU or CPUs""")
+
+if not FLAGS.use_cpu:
+  # select gpu devices
+  os.environ["CUDA_VISIBLE_DEVICES"] = "0" # e.g. "0,1,2", "0,2" 
+
 #python evaluate.py --data_dir /data/deasy/DylanHsu/N120/testing --model_path tmp/ckpt/bak/checkpoint_n120-4Layers-945.meta  --checkpoint_path tmp/ckpt/bak/checkpoint_n120-4Layers-945 --patch_size 32 --patch_layer 16 --stride_inplane 16 --stride_layer 8
 def np_dice_coe(output, target, loss_type='jaccard', axis=[1, 2, 3], smooth=1e-5):
     output = output[:,:,:,1]
