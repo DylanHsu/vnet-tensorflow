@@ -88,7 +88,7 @@ tf.app.flags.DEFINE_string('batch_job_name','',
     """Name the batch job so the checkpoints and tensorboard output are identifiable.""")
 tf.app.flags.DEFINE_float('max_ram',15.5,
     """Maximum amount of RAM usable by the CPU in GB.""")
-tf.app.flags.DEFINE_float('wce_weight','10',
+tf.app.flags.DEFINE_float('wce_weight','100',
     """Weight to use for the True labels to fight class imbalance in the Weighted Cross Entropy.""")
 
 tf.app.flags.DEFINE_string('vnet_convs','1,2,3,3,3',
@@ -230,9 +230,9 @@ def train():
             # create transformations to image and labels
             trainTransforms = [
                 #NiftiDataset.RandomHistoMatch(train_data_dir, FLAGS.image_filename, 1.0),
-                NiftiDataset.StatisticalNormalization(5.0, 5.0, nonzero_only=True),
+                #NiftiDataset.StatisticalNormalization(5.0, 5.0, nonzero_only=True),
                 #NiftiDataset.BSplineDeformation(),
-                NiftiDataset.DifficultyIndex((FLAGS.patch_size, FLAGS.patch_size, FLAGS.patch_layer), kD=5.0, kI=1.0),
+                #NiftiDataset.DifficultyIndex((FLAGS.patch_size, FLAGS.patch_size, FLAGS.patch_layer), kD=5.0, kI=1.0),
                 NiftiDataset.RandomCrop((FLAGS.patch_size, FLAGS.patch_size, FLAGS.patch_layer),FLAGS.drop_ratio,FLAGS.min_pixel),
                 NiftiDataset.RandomNoise(),
                 NiftiDataset.RandomFlip(0.5, [True,True,True]),
@@ -247,8 +247,8 @@ def train():
                 #NiftiDataset.Resample((0.45,0.45,0.45)),
                 ]
             testTransforms = [
-                NiftiDataset.StatisticalNormalization(5.0, 5.0, nonzero_only=True),
-                NiftiDataset.RandomCrop((FLAGS.patch_size, FLAGS.patch_size, FLAGS.patch_layer),FLAGS.drop_ratio,FLAGS.min_pixel),
+                NiftiDataset.StatisticalNormalization(5.0, 5.0, nonzero_only=True, zero_floor=True),
+                NiftiDataset.RandomCrop((FLAGS.patch_size, FLAGS.patch_size, FLAGS.patch_layer),0.5,FLAGS.min_pixel),
                 ]
             
             TrainDataset = NiftiDataset.NiftiDataset(
@@ -264,7 +264,7 @@ def train():
             trainDataset = TrainDataset.get_dataset()
             # Here there are batches of size num_crops, unbatch and shuffle
             trainDataset = trainDataset.apply(tf.contrib.data.unbatch())
-            trainDataset = trainDataset.repeat(3) 
+            #trainDataset = trainDataset.repeat(3) 
             trainDataset = trainDataset.batch(FLAGS.batch_size)
             trainDataset = trainDataset.prefetch(5)
             #trainDataset = trainDataset.apply(tf.contrib.data.prefetch_to_device('/gpu:0'))
@@ -282,7 +282,7 @@ def train():
             testDataset = TestDataset.get_dataset()
             # Here there are batches of size num_crops, unbatch and shuffle
             testDataset = testDataset.apply(tf.contrib.data.unbatch())
-            testDataset = testDataset.repeat(3)
+            testDataset = testDataset.repeat(10)
             testDataset = testDataset.batch(FLAGS.batch_size)
             testDataset = testDataset.prefetch(5)
             #testDataset = testDataset.apply(tf.contrib.data.prefetch_to_device('/gpu:0'))
@@ -560,7 +560,7 @@ def train():
               loss_fn = loss_fn + l2_loss
               tf.summary.scalar('l2_loss', l2_loss)
             
-            tf.summary.scalar('loss_fn',loss_fn)
+            tf.summary.scalar('loss_avg',loss_avg)
 
             # train on single batch, unused
             #train_op = optimizer.minimize(
@@ -583,6 +583,7 @@ def train():
               accum_op = [accum_tvars[i].assign_add(batch_grad_var[0]) for i, batch_grad_var in enumerate(batch_grads_vars)]
               compute_gradient_op = []
               # Operation to apply the accumulated gradients
+              specific_dice_weight = tf.constant(1.0,dtype=tf.float32)
             elif FLAGS.loss_function == 'specific_dice':
               # g_i: the gradient of the Dice metric for the i'th sample
               g_i = optimizer.compute_gradients(1. - specific_dice_op)
@@ -609,6 +610,7 @@ def train():
                   compute_gradient_op += [accum_tvars[j].assign(specific_dice_gsum[j]) / n_ab]
               
             elif FLAGS.loss_function == 'dice':
+              specific_dice_weight = tf.constant(1.0,dtype=tf.float32)
               # The Dice and Jaccard scores are evaluated across the voxels of all the samples in the batch.
               # To get the gradient of that thing, we need to sum the gradient of the numerator and denominator 
               # of the Dice (Jaccard) score over the batch samples.
@@ -627,6 +629,7 @@ def train():
                 compute_gradient_op += [accum_tvars[j].assign( ((soft_dice_numerator_sum+smooth_batch) * soft_denominator_gsum[j] - (soft_dice_denominator_sum+smooth_batch) * soft_numerator_gsum[j]) / ((soft_dice_denominator_sum+smooth_batch)*(soft_dice_denominator_sum+smooth_batch))) ]
 
             elif FLAGS.loss_function == 'jaccard':
+              specific_dice_weight = tf.constant(1.0,dtype=tf.float32)
               num_g_i   = optimizer.compute_gradients(soft_jaccard_numerator_op, t_vars)
               den_g_i = optimizer.compute_gradients(soft_jaccard_denominator_op, t_vars)
               # Operation to accumulate the numerator and denominators and their gradients
@@ -705,7 +708,7 @@ def train():
           checkpoint_slug = checkpoint_slug + "_" + FLAGS.batch_job_name
         checkpoint_prefix = os.path.join(FLAGS.checkpoint_dir, checkpoint_slug)
         print("Setting up Saver...")
-        saver = tf.train.Saver(keep_checkpoint_every_n_hours=10000,max_to_keep=1)
+        saver = tf.train.Saver(keep_checkpoint_every_n_hours=8,max_to_keep=1)
 
         #config = tf.ConfigProto(device_count={"CPU": 4})
         config = tf.ConfigProto()

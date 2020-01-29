@@ -1,6 +1,6 @@
 import SimpleITK as sitk
 import tensorflow as tf
-import os
+import os, sys
 import numpy as np
 import math
 import random
@@ -451,6 +451,9 @@ class RandomCrop(object):
     size_old = image[0].GetSize()
     size_new = self.output_size
 
+    statFilter = sitk.StatisticsImageFilter()
+    statFilter.Execute(label)
+    
     contain_label = False
 
     roiFilter = sitk.RegionOfInterestImageFilter()
@@ -462,7 +465,11 @@ class RandomCrop(object):
     # Calculate this boolean for the image, not for the crop
     # That way, drop_ratio is the fraction of images for which we get an empty crop,
     # not the fraction of crops
-    keep_empty = self.drop(self.drop_ratio)
+    if statFilter.GetSum() >= self.min_pixel:
+      keep_empty = self.drop(self.drop_ratio)
+    else:
+      keep_empty = True
+    samples=0
     while not contain_label: 
       # get the start crop coordinate in ijk
       if size_old[0] <= size_new[0]:
@@ -483,18 +490,14 @@ class RandomCrop(object):
       roiFilter.SetIndex([start_i,start_j,start_k])
 
       label_crop = roiFilter.Execute(label)
-      statFilter = sitk.StatisticsImageFilter()
       statFilter.Execute(label_crop)
 
       # will iterate until a sub volume containing label is extracted
-      # pixel_count = seg_crop.GetHeight()*seg_crop.GetWidth()*seg_crop.GetDepth()
-      # if statFilter.GetSum()/pixel_count<self.min_ratio:
-      #if statFilter.GetSum()>self.min_pixel:
-      #  contain_label = keep_self.drop(self.drop_ratio) # has some probabilty to contain patch with empty label
-      #else:
-      #  contain_label = True
-      if statFilter.GetSum()>self.min_pixel or keep_empty is True:
+      if statFilter.GetSum()>=self.min_pixel or keep_empty is True:
         contain_label = True
+      samples+=1
+      if samples>100000:
+        sys.exit("Too many attempts to randomly crop, reconsider min_pixel and drop_ratio values")
 
     image_crop = [roiFilter.Execute(volume) for volume in image]
 

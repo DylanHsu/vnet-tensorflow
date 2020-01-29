@@ -39,6 +39,10 @@ tf.app.flags.DEFINE_integer('batch_size',1,
     """Setting batch size (currently only accept 1)""")
 tf.app.flags.DEFINE_string('suffix','',
     """Suffix for saving""")
+tf.app.flags.DEFINE_string('case','',
+    """Specific case to evaluate""")
+tf.app.flags.DEFINE_boolean('is_batch',False,
+    """Disable progress bar if this is a batch job""")
 #python evaluate.py --data_dir /data/deasy/DylanHsu/N120/testing --model_path tmp/ckpt/bak/checkpoint_n120-4Layers-945.meta  --checkpoint_path tmp/ckpt/bak/checkpoint_n120-4Layers-945 --patch_size 32 --patch_layer 16 --stride_inplane 16 --stride_layer 8
 def np_dice_coe(output, target, loss_type='jaccard', axis=[1, 2, 3], smooth=1e-5):
     output = output[:,:,:,1]
@@ -66,6 +70,7 @@ def np_dice_coe(output, target, loss_type='jaccard', axis=[1, 2, 3], smooth=1e-5
     return dice
 
 def prepare_batch(image,ijk_patch_indices):
+    # not using this function anymore - requires too much memory!
     image_batches = []
     for batch in ijk_patch_indices:
         image_batch = []
@@ -80,6 +85,14 @@ def prepare_batch(image,ijk_patch_indices):
         
     return image_batches
 
+def get_one_batch(image, batch):
+    image_batch = []
+    for patch in batch:
+        image_patch = image[patch[0]:patch[1],patch[2]:patch[3],patch[4]:patch[5]]
+        image_batch.append(image_patch)
+    image_batch = np.asarray(image_batch)
+    return image_batch
+
 def evaluate():
     """evaluate the vnet model by stepwise moving along the 3D image"""
     # restore model grpah
@@ -93,7 +106,7 @@ def evaluate():
     # create transformations to image and labels
     transforms = [
         # NiftiDataset.Normalization(),
-        NiftiDataset.StatisticalNormalization(5.0,5.0,nonzero_only=True),
+        NiftiDataset.StatisticalNormalization(5.0,5.0,nonzero_only=True,zero_floor=True),
         #NiftiDataset.Resample(0.75),
         #NiftiDataset.Padding((FLAGS.patch_size, FLAGS.patch_size, FLAGS.patch_layer))      
         ]
@@ -108,6 +121,8 @@ def evaluate():
         print("{}: Restore checkpoint success".format(datetime.datetime.now()))
         
         for case in os.listdir(FLAGS.data_dir):
+            if FLAGS.case != '' and FLAGS.case != case:
+                continue
             # ops to load data
             # support multiple image input, but here only use single channel, label file should be a single file with different classes
 
@@ -235,12 +250,20 @@ def evaluate():
                             patch_total += 1
                             #print('Patch %d will encapsulate (%d,%d,%d) to (%d,%d,%d)' % (patch_total, istart, jstart, kstart, iend, jend, kend))
                 
-                batches = prepare_batch(image_np,ijk_patch_indices)
+                #batches = prepare_batch(image_np,ijk_patch_indices)
 
-                # acutal segmentation
-                for i in tqdm(range(len(batches))):
-                    batch = batches[i]
-                    [pred, softmax] = sess.run(['predicted_label/prediction:0','softmax/softmax:0'], feed_dict={'images_placeholder:0': batch})
+                # actual segmentation
+                #for i in tqdm(range(len(batches))):
+                if not FLAGS.is_batch:
+                    the_iterations = tqdm(range(len(ijk_patch_indices)))
+                else:
+                    the_iterations = range(len(ijk_patch_indices))
+
+                for i in the_iterations:
+                    batch = ijk_patch_indices[i]
+                    #batch_image = batches[i]
+                    batch_image = get_one_batch(image_np, batch)
+                    [pred, softmax] = sess.run(['predicted_label/prediction:0','softmax/softmax:0'], feed_dict={'images_placeholder:0': batch_image})
                     istart = ijk_patch_indices[i][0][0]
                     iend = ijk_patch_indices[i][0][1]
                     jstart = ijk_patch_indices[i][0][2]

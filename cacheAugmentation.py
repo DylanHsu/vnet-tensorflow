@@ -8,8 +8,8 @@ import shutil
 from glob import glob
 
 nAug=100
-input_data_dir='/data/deasy/DylanHsu/N200/training'
-output_data_dir='/data/deasy/DylanHsu/N200/augcache/training'
+input_data_dir='/data/deasy/DylanHsu/N200_1mm3/training'
+output_data_dir='/data/deasy/DylanHsu/N200_1mm3/augcache/training'
 image_filename='img.nii.gz'
 label_filename='label_smoothed.nii.gz'
 

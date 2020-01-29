@@ -6,7 +6,7 @@ prefix = 'cacheAug'
 jobfolder = "./jobs/"
 cpu_cores = 4 
 cpu_ram = 4 
-case_dir = "/data/deasy/DylanHsu/N200/training/"
+case_dir = "/data/deasy/DylanHsu/N200_1mm3/training/"
 # Clear job folder
 #old_jobs = glob(jobfolder + "*")
 #for oj in old_jobs:
