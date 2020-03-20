@@ -32,9 +32,9 @@ for name in list(FLAGS):
       delattr(FLAGS,name)
 tf.app.flags.DEFINE_string('data_dir', './data',
     """Directory of stored data.""")
-tf.app.flags.DEFINE_string('image_filename','img.nii',
+tf.app.flags.DEFINE_string('image_filename','mr1.nii.gz,ct.nii.gz',
     """Image filename""")
-tf.app.flags.DEFINE_string('label_filename','label.nii',
+tf.app.flags.DEFINE_string('label_filename','label.nii.gz',
     """Label filename""")
 tf.app.flags.DEFINE_integer('batch_size',1,
     """Size of batch""")               
@@ -48,8 +48,8 @@ tf.app.flags.DEFINE_float('small_bias_diameter',10.0,
     """Definition of small CCs [mm]""")
 tf.app.flags.DEFINE_float('ccrop_sigma',2.5,
     """Value of sigma to use for confidence crops""")               
-tf.app.flags.DEFINE_integer('num_channels',1,
-    """Number of channels (MRI series)""")               
+tf.app.flags.DEFINE_integer('num_channels',2,
+    """Number of channels""")               
 tf.app.flags.DEFINE_integer('patch_size',128,
     """Size of a data patch""")
 tf.app.flags.DEFINE_integer('patch_layer',128,
@@ -110,8 +110,6 @@ tf.app.flags.DEFINE_float('weighted_dice_kD',1.0,
     """Weight for the Diameter term in the Weighted-Dice paradigm.""")
 tf.app.flags.DEFINE_float('weighted_dice_kI',5.0,
     """Weight for the Intensity term in the Weighted-Dice paradigm.""")
-tf.app.flags.DEFINE_boolean('use_gauss_filter',False,
-    """Use trainable gaussian kernel filter after last CNN layer""")
 # tf.app.flags.DEFINE_float('class_weight',0.15,
 #     """The weight used for imbalanced classes data. Currently only apply on binary segmentation class (weight for 0th class, (1-weight) for 1st class)""")
 
@@ -241,10 +239,10 @@ def train():
 
             trainTransforms = [
                 #NiftiDataset.RandomHistoMatch(train_data_dir, FLAGS.image_filename, 1.0),
-                #NiftiDataset.StatisticalNormalization(5.0, 5.0, nonzero_only=True),
+                NiftiDataset.StatisticalNormalization(0, 5.0, 5.0, nonzero_only=True),
                 #NiftiDataset.BSplineDeformation(),
                 NiftiDataset.RandomCrop((FLAGS.patch_size, FLAGS.patch_size, FLAGS.patch_layer),FLAGS.drop_ratio,FLAGS.min_pixel),
-                NiftiDataset.RandomNoise(),
+                NiftiDataset.RandomNoise(0,0.1),
                 NiftiDataset.RandomFlip(0.5, [True,True,True]),
                 
                 #NiftiDataset.ThresholdCrop(),
@@ -258,21 +256,22 @@ def train():
                 ]
             if FLAGS.use_weighted_dice is True:
                 trainTransforms = [NiftiDataset.DifficultyIndex((FLAGS.patch_size, FLAGS.patch_size, FLAGS.patch_layer), FLAGS.weighted_dice_kD, FLAGS.weighted_dice_kI)] + trainTransforms
+            
             testTransforms = [
-                NiftiDataset.StatisticalNormalization(5.0, 5.0, nonzero_only=True, zero_floor=True),
+                NiftiDataset.StatisticalNormalization(0, 5.0, 5.0, nonzero_only=True, zero_floor=True),
                 NiftiDataset.RandomCrop((FLAGS.patch_size, FLAGS.patch_size, FLAGS.patch_layer),0.5,FLAGS.min_pixel),
                 ]
             
             TrainDataset = NiftiDataset.NiftiDataset(
                 data_dir=train_data_dir,
-                image_filename=FLAGS.image_filename,
+                image_filenames=FLAGS.image_filename,
                 label_filename=FLAGS.label_filename,
                 transforms=trainTransforms,
                 num_crops=FLAGS.num_crops,
                 train=True,
                 small_bias=FLAGS.small_bias,
-                small_bias_diameter=FLAGS.small_bias_diameter
-                #peek_dir='data/peek_train'
+                small_bias_diameter=FLAGS.small_bias_diameter,
+                cpu_threads=8
                 )
             
             trainDataset = TrainDataset.get_dataset()
@@ -288,11 +287,12 @@ def train():
 
             TestDataset = NiftiDataset.NiftiDataset(
                 data_dir=test_data_dir,
-                image_filename=FLAGS.image_filename,
+                image_filenames=FLAGS.image_filename,
                 label_filename=FLAGS.label_filename,
                 transforms=testTransforms,
                 num_crops=FLAGS.num_crops, #10
-                train=True
+                train=True,
+                cpu_threads=8
             )
 
             testDataset = TestDataset.get_dataset()
@@ -319,8 +319,7 @@ def train():
                 num_levels=len(convs)-1,    
                 num_convolutions= tuple(convs[0:-1]),
                 bottom_convolutions= convs[-1], 
-                activation_fn="prelu",
-                gauss_filter=FLAGS.use_gauss_filter) 
+                activation_fn="prelu")
 
             logits = model.network_fn(images_placeholder)
 

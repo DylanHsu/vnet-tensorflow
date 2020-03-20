@@ -89,8 +89,7 @@ class VNet(object):
                  num_convolutions=(1, 2, 3, 3),
                  bottom_convolutions=3,
                  is_training = True,
-                 activation_fn="relu",
-                 gauss_filter=False):
+                 activation_fn="relu"):
         """
         Implements VNet architecture https://arxiv.org/abs/1606.04797
         :param num_classes: Number of output classes.
@@ -109,7 +108,6 @@ class VNet(object):
         self.num_convolutions = num_convolutions
         self.bottom_convolutions = bottom_convolutions
         self.is_training = is_training
-        self.gauss_filter = gauss_filter
 
         if (activation_fn == "relu"):
             self.activation_fn = tf.nn.relu
@@ -162,11 +160,4 @@ class VNet(object):
             #why is this line here?
             #logits = tf.layers.batch_normalization(logits, momentum=0.99, epsilon=0.001,center=True, scale=True,training=self.is_training)
             
-            if self.gauss_filter:
-                gf_sigma = tf.get_variable("gauss_filter_sigma"   , dtype=tf.float32, trainable=True, initializer=tf.constant(1.)) # voxels not mm
-                gauss_kernel = gaussian_kernel_3d(2, 0.,gf_sigma)
-                gauss_kernel = gauss_kernel[:,:,:,tf.newaxis,tf.newaxis]
-                gauss_kernel = tf.tile(gauss_kernel,[1,1,1,2,2])
-                logits = tf.nn.conv3d(logits, gauss_kernel, strides=[1,1,1,1,1], padding="SAME")
-
         return logits

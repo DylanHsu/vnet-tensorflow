@@ -12,43 +12,50 @@ class NiftiDataset(object):
   Currently only support linear interpolation method
   Args:
 		data_dir (string): Path to data directory.
-    image_filename (string): Filename of image data.
+    image_filenames (string|tuple): Filenames of image data, separated by commas or in a tuple.
     label_filename (string): Filename of label data.
     transforms (list): List of SimpleITK image transformations.
     num_crops: Number of random crops to serve per image per epoch
     train (bool): Determine whether the dataset class run in training/inference mode. When set to false, an empty label with same metadata as image is generated.
-    peek_dir (string): Place to write images after the transforms for debugging.
 
   """
 # update above section descriptions
 
   def __init__(self,
     data_dir = '',
-    image_filename = '',
+    image_filenames = '',
     label_filename = '',
     transforms=None,
     num_crops=1,
     train=False,
-    peek_dir = '',
+    labels=[0,1],
     small_bias=1,
     small_bias_diameter=10.,
     bounding_boxes=False,
     bb_slice_axis=2,
-    bb_slices=1):
+    bb_slices=1,
+    cpu_threads=4):
+    
+    assert isinstance(image_filenames, (str,tuple))
+    if isinstance(image_filenames,str):
+      self.image_filenames = tuple(image_filenames.split(','))
+    else:
+      assert isinstance(image_filenames[0], str)
+      self.image_filenames = image_filenames
 
     # Init membership variables
     self.data_dir = data_dir
-    self.image_filename = image_filename
     self.label_filename = label_filename
+    self.labels = labels
     self.transforms = transforms
     self.train = train
     self.num_crops = num_crops
-    self.peek_dir = peek_dir
     self.small_bias = small_bias
     self.small_bias_diameter = small_bias_diameter
     self.bounding_boxes = bounding_boxes
     self.bb_slice_axis = 2
     self.bb_slices = 1
+    self.cpu_threads = cpu_threads
 
     self.profile = {}
     if self.transforms:
@@ -56,25 +63,20 @@ class NiftiDataset(object):
         self.profile[type(transform)] = 0.0
   
   def get_dataset(self):
-    image_paths = []
-    label_paths = []
-    cases = os.listdir(self.data_dir)
-    for case in cases:
-      image_paths.append(os.path.join(self.data_dir,case,self.image_filename))
-      label_paths.append(os.path.join(self.data_dir,case,self.label_filename))
+    case_list = os.listdir(self.data_dir)
 
-    dataset = tf.data.Dataset.from_tensor_slices((image_paths,label_paths))
-    dataset = dataset.shuffle(buffer_size=len(cases))
+    dataset = tf.data.Dataset.from_tensor_slices(case_list)
+    dataset = dataset.shuffle(buffer_size=len(case_list))
     
     if self.bounding_boxes is True: # I believe this is optimal since get_dataset only called once
-      dataset = dataset.map(lambda image_path, label_path: tuple(tf.py_func(
-        self.bb_input_parser, [image_path, label_path], [tf.float32,tf.float32])), num_parallel_calls=4)
+      dataset = dataset.map(lambda case: tuple(tf.py_func(
+        self.bb_input_parser, [case], [tf.float32,tf.float32])), num_parallel_calls=self.cpu_threads)
     else:
-      dataset = dataset.map(lambda image_path, label_path: tuple(tf.py_func(
-        self.input_parser, [image_path, label_path], [tf.float32,tf.int32])), num_parallel_calls=4)
+      dataset = dataset.map(lambda case: tuple(tf.py_func(
+        self.input_parser, [case], [tf.float32,tf.int32])), num_parallel_calls=self.cpu_threads)
 
     self.dataset = dataset
-    self.data_size = len(image_paths) # This is currently inaccurate
+    self.data_size = len(case_list)
     return self.dataset
 
   def read_image(self,path):
@@ -83,57 +85,108 @@ class NiftiDataset(object):
     image = reader.Execute()
     return image
 
-  def input_parser(self,image_path, label_path):
+  def input_parser(self, case):
+    try:
+      case_decoded = case.decode("utf-8")
+      case = case_decoded
+    except:
+      pass
     # Input parser python function which gets wrapped
     # read image and label
-    image = self.read_image(image_path.decode("utf-8"))
-    castImageFilter = sitk.CastImageFilter()
-
-    #castImageFilter.SetOutputPixelType(sitk.sitkFloat32)
-    castImageFilter.SetOutputPixelType(sitk.sitkInt16)
-    # Workaround: convert to 4D Numpy then back to 3D SimpleITK images
-    # This will have length N, where N is the number of (MRI) series
-    itkImages3d = []
-    #if len(image_np.shape) == 3:
-    if len(image.GetSize()) == 3:
-      itkImage3d = castImageFilter.Execute(image)
-      itkImages3d += [itkImage3d]
-      #itkImages3d = [image_np]
-    else:
-      # Weird NIFTI convention: Dimension 3 is the index!
-      image_np = sitk.GetArrayFromImage(image)
-      for i in range(image_np.shape[3]): 
-        volume = image_np[:,:,:,i]
-        itkImage3d = sitk.GetImageFromArray(volume)
-        itkImage3d.SetOrigin(image.GetOrigin())
-        itkImage3d.SetSpacing(image.GetSpacing())
-        itkImage3d.SetDirection(image.GetDirection())
-        itkImage3d = castImageFilter.Execute(itkImage3d)
-        itkImages3d += [itkImage3d]
+    image_paths = []
+    for channel in range(len(self.image_filenames)):
+      image_paths.append(os.path.join(self.data_dir,case,self.image_filenames[channel]))  
     
+    # read image and label
+    images = []
+    for channel in range(len(image_paths)):
+      image = self.read_image(image_paths[channel])
+      images.append(image)
+
+    for channel in range(len(images)):
+      # check header same
+      sameSize = images[channel].GetSize() == images[0].GetSize()
+      sameSpacing = images[channel].GetSpacing() == images[0].GetSpacing()
+      sameDirection = images[channel].GetDirection() == images[0].GetDirection()
+      if sameSize and sameSpacing and sameDirection:
+        continue
+      else:
+        raise Exception('Header info inconsistent: {}'.format(image_paths[channel]))
+        exit()
+      
+    label = sitk.Image(images[0].GetSize(),sitk.sitkUInt8)
+    label.SetOrigin(images[0].GetOrigin())
+    label.SetSpacing(images[0].GetSpacing())
+    label.SetDirection(images[0].GetDirection())
+
     if self.train:
-      label = self.read_image(label_path.decode("utf-8"))
-      castImageFilter.SetOutputPixelType(sitk.sitkInt8)
-      label = castImageFilter.Execute(label)
+      label_ = self.read_image(os.path.join(self.data_dir,case, self.label_filename))
+
+      # check header same
+      sameSize = label_.GetSize() == images[0].GetSize()
+      sameSpacing = label_.GetSpacing() == images[0].GetSpacing()
+      sameDirection = label_.GetDirection() == images[0].GetDirection()
+      if not (sameSize and sameSpacing and sameDirection):
+        raise Exception('Header info inconsistent: {}'.format(os.path.join(self.data_dir,case, self.label_filename)))
+        exit()
+
+      thresholdFilter = sitk.BinaryThresholdImageFilter()
+      thresholdFilter.SetOutsideValue(0)
+      thresholdFilter.SetInsideValue(1)
+
+      castImageFilter = sitk.CastImageFilter()
+      castImageFilter.SetOutputPixelType(sitk.sitkUInt8)
+      for channel in range(len(self.labels)):
+        thresholdFilter.SetLowerThreshold(self.labels[channel])
+        thresholdFilter.SetUpperThreshold(self.labels[channel])
+        one_hot_label_image = thresholdFilter.Execute(label_)
+        multiFilter = sitk.MultiplyImageFilter()
+        one_hot_label_image = multiFilter.Execute(one_hot_label_image, channel)
+        # cast one_hot_label to sitkUInt8
+        one_hot_label_image = castImageFilter.Execute(one_hot_label_image)
+        one_hot_label_image.SetSpacing(images[0].GetSpacing())
+        one_hot_label_image.SetDirection(images[0].GetDirection())
+        one_hot_label_image.SetOrigin(images[0].GetOrigin())
+        addFilter = sitk.AddImageFilter()
+        label = addFilter.Execute(label,one_hot_label_image)
+    if self.train:
+      label_ = self.read_image(os.path.join(self.data_dir, case, self.label_filename))
+      # check header same
+      sameSize = label_.GetSize() == images[0].GetSize()
+      sameSpacing = label_.GetSpacing() == images[0].GetSpacing()
+      sameDirection = label_.GetDirection() == images[0].GetDirection()
+      if not (sameSize and sameSpacing and sameDirection):
+        raise Exception('Header info inconsistent: {}'.format(os.path.join(self.data_dir,case, self.label_filename)))
+        exit()
+   
+      thresholdFilter = sitk.BinaryThresholdImageFilter()
+      thresholdFilter.SetOutsideValue(0)
+      thresholdFilter.SetInsideValue(1)
+
+      castImageFilter = sitk.CastImageFilter()
+      castImageFilter.SetOutputPixelType(sitk.sitkUInt8)
+      for channel in range(len(self.labels)):
+        thresholdFilter.SetLowerThreshold(self.labels[channel])
+        thresholdFilter.SetUpperThreshold(self.labels[channel])
+        one_hot_label_image = thresholdFilter.Execute(label_)
+        multiFilter = sitk.MultiplyImageFilter()
+        one_hot_label_image = multiFilter.Execute(one_hot_label_image, channel)
+        # cast one_hot_label to sitkUInt8
+        one_hot_label_image = castImageFilter.Execute(one_hot_label_image)
+        one_hot_label_image.SetSpacing(images[0].GetSpacing())
+        one_hot_label_image.SetDirection(images[0].GetDirection())
+        one_hot_label_image.SetOrigin(images[0].GetOrigin())
+        addFilter = sitk.AddImageFilter()
+        label = addFilter.Execute(label,one_hot_label_image)
     else:
       # Not sure this handles the case where "image" is 4D
-      label = sitk.Image(itkImages3d[0].GetSize(),sitk.sitkInt8)
-      label.SetOrigin(itkImages3d[0].GetOrigin())
-      label.SetSpacing(itkImages3d[0].GetSpacing())
-      label.SetDirection(itkImages3d[0].GetDirection())
+      label = sitk.Image(images[0].GetSize(),sitk.sitkUInt8)
+      label.SetOrigin(images[0].GetOrigin())
+      label.SetSpacing(images[0].GetSpacing())
+      label.SetDirection(images[0].GetDirection())
     # Form the sample dict with the list of 3D ITK Images and the label
-    sample = {'image': itkImages3d, 'label':label}
+    sample = {'image': images, 'label':label}
     
-    if self.peek_dir != '':
-      case_name = os.path.basename(os.path.dirname(image_path)) # for peeking
-      peek_case_folder = os.path.join(os.fsencode(self.peek_dir), case_name)
-      try:
-        os.mkdir(peek_case_folder)
-      except:
-        pass
-      writer = sitk.ImageFileWriter()
-      writer.UseCompressionOn()
-   
     images_np=[]
     labels_np=[]
     cubicMmPerVoxel = label.GetSpacing()[0] * label.GetSpacing()[1] * label.GetSpacing()[2];
@@ -156,28 +209,13 @@ class NiftiDataset(object):
         if minD < self.small_bias_diameter:
           num_crops *= self.small_bias
     for multiple_crops in range(0,num_crops):
-      sample_tfm = {'image': itkImages3d.copy(), 'label':label}
+      sample_tfm = {'image': images.copy(), 'label':label}
       if self.transforms:
         for transform in self.transforms:
           t1=time.process_time()
           sample_tfm = transform(sample_tfm)
           t2=time.process_time()
           self.profile[type(transform)] += (t2-t1)
-
-      
-      # If we are peeking, write the images to the directory
-      if self.peek_dir != '':
-        i=0
-        for volume in sample_tfm['image']:
-          
-          writer.SetFileName(os.fsdecode(os.path.join(peek_case_folder,os.fsencode('img_%d_crop%d.nii.gz'%(i,multiple_crops)))))
-          writer.Execute(volume)
-          i+=1
-        writer.SetFileName(os.fsdecode(os.path.join(peek_case_folder,os.fsencode('label_crop%d.nii.gz'%(multiple_crops)))))
-        castImageFilter.SetOutputPixelType(sitk.sitkInt16)
-        labelInt16 = castImageFilter.Execute(sample_tfm['label'])
-        labelInt16.CopyInformation(sample_tfm['image'][0])
-        writer.Execute(labelInt16)
 
       # convert sample to tf tensors
       image_np = [] # New size of image_np, inferred from the transformed shape
@@ -200,51 +238,119 @@ class NiftiDataset(object):
     label_stack = np.stack(labels_np)
     return image_stack, label_stack
  
-  def bb_input_parser(self, image_path, label_path):
+  def bb_input_parser(self, case):
     # Input parser python function which gets wrapped
     # This version of the function differs greatly and returns a bounding box
-
+    try:
+      case_decoded = case.decode("utf-8")
+      case = case_decoded
+    except:
+      pass
     # read image and label
-    image = self.read_image(image_path.decode("utf-8"))
-    castImageFilter = sitk.CastImageFilter()
-    castImageFilter.SetOutputPixelType(sitk.sitkFloat32)
-    # Workaround: convert to 4D Numpy then back to 3D SimpleITK images
-    # This will have length N, where N is the number of (MRI) series
-    itkImages3d = []
-    if len(image.GetSize()) == 3:
-      itkImage3d = castImageFilter.Execute(image)
-      itkImages3d += [itkImage3d]
-    else:
-      # Weird NIFTI convention: Dimension 3 is the index!
-      image_np = sitk.GetArrayFromImage(image)
-      for i in range(image_np.shape[3]): 
-        volume = image_np[:,:,:,i]
-        itkImage3d = sitk.GetImageFromArray(volume)
-        itkImage3d.SetOrigin(image.GetOrigin())
-        itkImage3d.SetSpacing(image.GetSpacing())
-        itkImage3d.SetDirection(image.GetDirection())
-        itkImage3d = castImageFilter.Execute(itkImage3d)
-        itkImages3d += [itkImage3d]
+    image_paths = []
+    for channel in range(len(self.image_filenames)):
+      image_paths.append(os.path.join(self.data_dir,case,self.image_filenames[channel]))  
     
+    # read image and label
+    images = []
+    for channel in range(len(image_paths)):
+      image = self.read_image(image_paths[channel])
+      images.append(image)
+
+    for channel in range(len(images)):
+      # check header same
+      sameSize = images[channel].GetSize() == images[0].GetSize()
+      sameSpacing = images[channel].GetSpacing() == images[0].GetSpacing()
+      sameDirection = images[channel].GetDirection() == images[0].GetDirection()
+      if sameSize and sameSpacing and sameDirection:
+        continue
+      else:
+        raise Exception('Header info inconsistent: {}'.format(image_paths[channel]))
+        exit()
+      
+    label = sitk.Image(images[0].GetSize(),sitk.sitkUInt8)
+    label.SetOrigin(images[0].GetOrigin())
+    label.SetSpacing(images[0].GetSpacing())
+    label.SetDirection(images[0].GetDirection())
+
     if self.train:
-      label = self.read_image(label_path.decode("utf-8"))
-      castImageFilter.SetOutputPixelType(sitk.sitkInt8)
-      label = castImageFilter.Execute(label)
+      label_ = self.read_image(os.path.join(self.data_dir,case, self.label_filename))
+
+      # check header same
+      sameSize = label_.GetSize() == images[0].GetSize()
+      sameSpacing = label_.GetSpacing() == images[0].GetSpacing()
+      sameDirection = label_.GetDirection() == images[0].GetDirection()
+      if not (sameSize and sameSpacing and sameDirection):
+        raise Exception('Header info inconsistent: {}'.format(os.path.join(self.data_dir,case, self.label_filename)))
+        exit()
+
+      thresholdFilter = sitk.BinaryThresholdImageFilter()
+      thresholdFilter.SetOutsideValue(0)
+      thresholdFilter.SetInsideValue(1)
+
+      castImageFilter = sitk.CastImageFilter()
+      castImageFilter.SetOutputPixelType(sitk.sitkUInt8)
+      for channel in range(len(self.labels)):
+        thresholdFilter.SetLowerThreshold(self.labels[channel])
+        thresholdFilter.SetUpperThreshold(self.labels[channel])
+        one_hot_label_image = thresholdFilter.Execute(label_)
+        multiFilter = sitk.MultiplyImageFilter()
+        one_hot_label_image = multiFilter.Execute(one_hot_label_image, channel)
+        # cast one_hot_label to sitkUInt8
+        one_hot_label_image = castImageFilter.Execute(one_hot_label_image)
+        one_hot_label_image.SetSpacing(images[0].GetSpacing())
+        one_hot_label_image.SetDirection(images[0].GetDirection())
+        one_hot_label_image.SetOrigin(images[0].GetOrigin())
+        addFilter = sitk.AddImageFilter()
+        label = addFilter.Execute(label,one_hot_label_image)
+    if self.train:
+      label_ = self.read_image(os.path.join(self.data_dir, case, self.label_filename))
+      # check header same
+      sameSize = label_.GetSize() == images[0].GetSize()
+      sameSpacing = label_.GetSpacing() == images[0].GetSpacing()
+      sameDirection = label_.GetDirection() == images[0].GetDirection()
+      if not (sameSize and sameSpacing and sameDirection):
+        raise Exception('Header info inconsistent: {}'.format(os.path.join(self.data_dir,case, self.label_filename)))
+        exit()
+   
+      thresholdFilter = sitk.BinaryThresholdImageFilter()
+      thresholdFilter.SetOutsideValue(0)
+      thresholdFilter.SetInsideValue(1)
+
+      castImageFilter = sitk.CastImageFilter()
+      castImageFilter.SetOutputPixelType(sitk.sitkUInt8)
+      for channel in range(len(self.labels)):
+        thresholdFilter.SetLowerThreshold(self.labels[channel])
+        thresholdFilter.SetUpperThreshold(self.labels[channel])
+        one_hot_label_image = thresholdFilter.Execute(label_)
+        multiFilter = sitk.MultiplyImageFilter()
+        one_hot_label_image = multiFilter.Execute(one_hot_label_image, channel)
+        # cast one_hot_label to sitkUInt8
+        one_hot_label_image = castImageFilter.Execute(one_hot_label_image)
+        one_hot_label_image.SetSpacing(images[0].GetSpacing())
+        one_hot_label_image.SetDirection(images[0].GetDirection())
+        one_hot_label_image.SetOrigin(images[0].GetOrigin())
+        addFilter = sitk.AddImageFilter()
+        label = addFilter.Execute(label,one_hot_label_image)
     else:
-      label = sitk.Image(itkImages3d[0].GetSize(),sitk.sitkInt8)
-      label.SetOrigin(itkImages3d[0].GetOrigin())
-      label.SetSpacing(itkImages3d[0].GetSpacing())
-      label.SetDirection(itkImages3d[0].GetDirection())
+      # Not sure this handles the case where "image" is 4D
+      label = sitk.Image(images[0].GetSize(),sitk.sitkUInt8)
+      label.SetOrigin(images[0].GetOrigin())
+      label.SetSpacing(images[0].GetSpacing())
+      label.SetDirection(images[0].GetDirection())
+
     # Form the sample dict with the list of 3D ITK Images and the label
-    sample = {'image': itkImages3d, 'label':label}
+    sample = {'image': images, 'label':label}
     
-    
-    sample_tfm = {'image': itkImages3d.copy(), 'label':label}
+    sample_tfm = {'image': images.copy(), 'label':label}
     if self.transforms:
       for transform in self.transforms:
         sample_tfm = transform(sample_tfm)
 
     # Now we have to take 3D simple ITK images and make a stack of 2D images with bounding boxes
+    # Warning: This only makes single-class bounding boxes right now.
+    # For multiclass, we would need to find the connected components for each possible nonzero
+    # label value and make bounding boxes for those connected components with the corresponding class number.
     ccFilter = sitk.ConnectedComponentImageFilter()
     labelCC = ccFilter.Execute(sample_tfm['label'])
     labelShapeFilter = sitk.LabelShapeStatisticsImageFilter()
@@ -261,29 +367,7 @@ class NiftiDataset(object):
     boxes = []
     # centernet wants [y,x,height,width,class] where y,x are the center of the bounding box
     for i in range(1,labelShapeFilter.GetNumberOfLabels()+1):
-      # Commented out below is Centroid logic. For now assume that we have already transformed
-      # to the correct 2.5D input size using RandomCrop or ConfidenceCrop.
-      #centroid = sample_tfm['label'].TransformPhysicalPointToIndex(labelShapeFilter.GetCentroid(i))
-      #roiBox = [sample_tfm['label'].GetSize()[0], sample_tfm['label'].GetSize()[1], 1]
-      #roiFilter = sitk.RegionOfInterestImageFilter()
-      #roiFilter.SetSize(roiBox)
-      #roiFilter.SetIndex([0,0,centroid[2]])
-      #label_slice = roiFilter.Execute(sample_tfm['label'])
-      #sliceCC = ccFilter.Execute(label_slice)
-      #sliceShapeFilter = sitk.LabelShapeStatisticsImageFilter()
-      #sliceShapeFilter.Execute(sliceCC)
-      #assert sliceShapeFilter.GetNumberOfLabels()>0
-      #boxes = []
-      #for j in range(1,sliceShapeFilter.GetNumberOfLabels()+1):
-      #  box_3d = sliceShapeFilter.GetBoundingBox(j)
-      #  
-      #  box_2d = [box_3d[1] + float(box_3d[4])/2.,
-      #            box_3d[0] + float(box_3d[3])/2.,
-      #            box_3d[4],
-      #            box_3d[3],
-      #            0 # single class detection -> everything is class 0
-      #           ] 
-      #  boxes += [box_2d]
+      # Assume that we have already transformed to the correct 2.5D input size using RandomCrop or ConfidenceCrop.
       
       box_3d = labelShapeFilter.GetBoundingBox(i)
       # "The GetBoundingBox and GetRegion of the LabelShapeStatisticsImageFilter returns a bounding box is as [xstart, ystart, zstart, xsize, ysize, zsize]."
@@ -343,13 +427,15 @@ class StatisticalNormalization(object):
   Normalize an image by mapping intensity with intensity distribution
   """
 
-  def __init__(self, sigmaUp, sigmaDown, nonzero_only=False, zero_floor=False):
+  def __init__(self, channel, sigmaUp, sigmaDown, nonzero_only=False, zero_floor=False):
     self.name = 'StatisticalNormalization'
     #assert isinstance(nSigma, float)
     #self.nSigma = nSigma
+    assert isinstance(channel, int)
     assert isinstance(sigmaUp, float)
     assert isinstance(sigmaDown, float)
     assert isinstance(nonzero_only, bool)
+    self.channel = channel
     self.sigmaUp = sigmaUp
     self.sigmaDown = sigmaDown
     self.nonzero_only = nonzero_only
@@ -359,11 +445,13 @@ class StatisticalNormalization(object):
   def __call__(self, sample):
     image, label = sample['image'], sample['label']
     statisticsFilter = sitk.StatisticsImageFilter()
-    normalizedImage = image
     intensityWindowingFilter = sitk.IntensityWindowingImageFilter()
     intensityWindowingFilter.SetOutputMaximum(255)
     intensityWindowingFilter.SetOutputMinimum(0)
+    normalizedImage = image
     for i,volume in enumerate(image):
+      if i != self.channel:
+        continue
       if self.nonzero_only:
         volume_np = sitk.GetArrayFromImage(volume)
         nonzero_voxels = volume_np[volume_np > self.threshold]
@@ -665,19 +753,24 @@ class RandomNoise(object):
   """
   Randomly noise to the image in a sample. This is usually used for data augmentation.
   """
-  def __init__(self):
+  def __init__(self, channel, std=0.1):
     self.name = 'Random Noise'
+    assert isinstance(channel, int)
+    self.channel = channel
+    self.std = std
 
   def __call__(self, sample):
     self.noiseFilter = sitk.AdditiveGaussianNoiseImageFilter()
     self.noiseFilter.SetMean(0)
-    self.noiseFilter.SetStandardDeviation(0.1)
+    self.noiseFilter.SetStandardDeviation(self.std)
 
-    # print("Normalizing image...")
-    image, label = sample['image'], sample['label']
-    image[:] = [self.noiseFilter.Execute(volume) for volume in image]
-
-    return {'image': image, 'label': label}
+    image,label = sample['image'],sample['label']
+    noisyImage = image
+    for i,volume in enumerate(image):
+      if i != self.channel:
+        continue
+      noisyImage[i] = self.noiseFilter.Execute(volume)
+    return {'image': noisyImage, 'label': label}
 
 class ConfidenceCrop(object):
   """
@@ -962,29 +1055,30 @@ class RandomHistoMatch(object):
 
   data_dir: Directory containing the cases used for target distributions
   image_filename: filename of the target image, e.g. 'img.nii.gz'
+  channel: Which channel to transform this way
   match_prob: Chance to perform a matching
   """
-  def __init__(self, data_dir, image_filename, match_prob=1.0):
+  def __init__(self, channel, data_dir, image_filename, match_prob=1.0):
     self.name = 'RandomHistoMatch'
     assert isinstance(data_dir, str)
     self.data_dir = data_dir
     assert isinstance(image_filename, str)
+    assert isinstance(channel, int)
+    self.channel = channel
     self.image_filename = image_filename
     assert isinstance(match_prob, float)
     self.match_prob = match_prob
-    cases = os.listdir(self.data_dir)
-    self.image_paths = []
-    for case in cases:
-      self.image_paths.append(os.path.join(self.data_dir,case,self.image_filename))
+    self.cases = os.listdir(self.data_dir)
 
   def __call__(self, sample):
-    if (random.random() > self.match_prob):
+    if self.match_prob<1.0 and (random.random() > self.match_prob):
       return sample
     
     image, label = sample['image'], sample['label']
     
     # Choose a random target image file
-    target_path = random.choice(self.image_paths)
+    target_case = random.choice(self.cases)
+    target_path = os.path.join(self.data_dir, target_case, self.image_filename)
 
     # Get the array of target images to match to
     reader = sitk.ImageFileReader()
@@ -993,26 +1087,8 @@ class RandomHistoMatch(object):
     target_image = reader.Execute()
     castImageFilter = sitk.CastImageFilter()
     castImageFilter.SetOutputPixelType(sitk.sitkFloat32)
-    target_images_3d = []
-    if len(target_image.GetSize()) == 3: # 3D image
-      target_image_3d = castImageFilter.Execute(target_image)
-      target_images_3d += [target_image_3d]
-    else: # 4D image, make 3d images from the slices
-      target_image_np = sitk.GetArrayFromImage(image)
-      for i in range(target_image_np.shape[3]): 
-        volume = target_image_np[:,:,:,i]
-        target_image_3d = sitk.GetImageFromArray(volume)
-        target_image_3d.SetOrigin(image.GetOrigin())
-        target_image_3d.SetSpacing(image.GetSpacing())
-        target_image_3d.SetDirection(image.GetDirection())
-        target_image_3d = castImageFilter.Execute(target_image_3d)
-        target_images_3d += [target_image_3d]
+    target_image = castImageFilter.Execute(target_image)
 
-
-
-    
-    # Match the images in the sample to the images in the target
-    assert len(image) == len(target_images_3d), 'Source and target for matching have different dimensions'
     histoMatchFilter = sitk.HistogramMatchingImageFilter()
     histoMatchFilter.SetNumberOfHistogramLevels(500)
     histoMatchFilter.SetNumberOfMatchPoints(500)
@@ -1022,15 +1098,12 @@ class RandomHistoMatch(object):
     btif = sitk.BinaryThresholdImageFilter()
     mif = sitk.MaskImageFilter()
     for i in range(len(image)):
-      castImageFilter.SetOutputPixelType(sitk.sitkFloat32)
-      volume = castImageFilter.Execute(image[i])
-      target_volume = target_images_3d[i]
-      volume_matched = histoMatchFilter.Execute( volume, target_volume )
-      # Apply mask of nonzero voxels to preserve zero/nonzero dichotomy 
-      #castImageFilter.SetOutputPixelType(sitk.sitkInt16)
-      #nonzeroMask = castImageFilter.Execute((btif.Execute(volume, 0.01, 1e15, 1, 0)))
-      #volume_matched = mif.Execute(volume_matched, nonzeroMask, 0, 0)
-      matchedImage.append(volume_matched)
+      if i != self.channel:
+        matchedImage.append(image[i])
+      else:
+        volume = image[i]
+        volume_matched = histoMatchFilter.Execute( volume, target_image )
+        matchedImage.append(volume_matched)
 
     return {'image': matchedImage, 'label': label}
 

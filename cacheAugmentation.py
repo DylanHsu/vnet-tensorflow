@@ -8,31 +8,34 @@ import shutil
 from glob import glob
 
 nAug=100
-input_data_dir='/data/deasy/DylanHsu/N401_unstripped/nifti'
-output_data_dir='/data/deasy/DylanHsu/N401_unstripped/augcache'
-image_filename='img.nii.gz'
+input_data_dir='/data/deasy/DylanHsu/SRS_N401/nifti'
+output_data_dir='/data/deasy/DylanHsu/SRS_N401/augcache'
+image_filenames=('mr1.nii.gz', 'ct.nii.gz')
 label_filename='label_smoothed.nii.gz'
 
 case = sys.argv[1]
 
 augTransforms = [
-  NiftiDataset.RandomHistoMatch(input_data_dir, image_filename, 1.0),
-  NiftiDataset.StatisticalNormalization(5.0, 5.0, nonzero_only=True, zero_floor=True),
+  NiftiDataset.RandomHistoMatch(0, input_data_dir, image_filenames[0], 1.0),
+  NiftiDataset.StatisticalNormalization(0, 5.0, 5.0, nonzero_only=True, zero_floor=True),
   NiftiDataset.BSplineDeformation(),
   NiftiDataset.RandomRotation(maxRot = 20*0.01745),  # 20 degrees
   NiftiDataset.ThresholdCrop(),
   ]
 augDataset = NiftiDataset.NiftiDataset(
   data_dir = input_data_dir,
-  image_filename = image_filename,
+  image_filenames = image_filenames,
   label_filename = label_filename,
   transforms = augTransforms,
   train=True
 )
 
-image_path = os.path.join(input_data_dir, case, image_filename)
+images = []
+for image_filename in list(image_filenames):
+  image_path = os.path.join(input_data_dir, case, image_filename)
+  image = augDataset.read_image(image_path)
+  images.append(image)
 label_path = os.path.join(input_data_dir, case, label_filename)
-image = augDataset.read_image(image_path)
 label = augDataset.read_image(label_path)
 
 writer = sitk.ImageFileWriter()
@@ -43,7 +46,7 @@ for iAug in range(1, nAug+1):
   #[image_stack, label_stack] = augDataset.input_parser(image_path.encode("utf-8"), label_path.encode("utf-8"))
   #image_np = image_stack[0,:]
   #label_np = label_stack[0,:]
-  sample_tfm = {'image': [image], 'label':label}  
+  sample_tfm = {'image': images, 'label':label}  
   for transform in augDataset.transforms:
     sample_tfm = transform(sample_tfm)
 
@@ -51,8 +54,10 @@ for iAug in range(1, nAug+1):
   if os.path.isdir(output_case_dir):
     shutil.rmtree(output_case_dir)
   os.mkdir(output_case_dir)
-  writer.SetFileName(os.path.join(output_case_dir, image_filename))
+  writer.SetFileName(os.path.join(output_case_dir, image_filenames[0]))
   writer.Execute(sample_tfm['image'][0])
+  writer.SetFileName(os.path.join(output_case_dir, image_filenames[1]))
+  writer.Execute(sample_tfm['image'][1])
   writer.SetFileName(os.path.join(output_case_dir, label_filename))
   writer.Execute(sample_tfm['label'])
 

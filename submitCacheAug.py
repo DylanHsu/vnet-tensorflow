@@ -6,7 +6,8 @@ prefix = 'cacheAug'
 jobfolder = "./jobs/"
 cpu_cores = 4 
 cpu_ram = 4 
-case_dir = "/data/deasy/DylanHsu/N401_unstripped/nifti/"
+#case_dir = "/data/deasy/DylanHsu/N401_unstripped/nifti/"
+case_dir = "/data/deasy/DylanHsu/SRS_N401/nifti/"
 # Clear job folder
 #old_jobs = glob(jobfolder + "*")
 #for oj in old_jobs:
@@ -33,8 +34,8 @@ for config in configs:
   f.write("#BSUB -R span[hosts=1]\n")
   f.write("#BSUB -R rusage[mem=%d]\n" % (cpu_ram//cpu_cores))
   f.write("#BSUB -W 24:00\n")
-  f.write("#BSUB -o "+jobfolder+"%J.stdout\n")
-  f.write("#BSUB -eo "+jobfolder+"%J.stderr\n")
+  f.write("#BSUB -o " +jobfolder+"/logs/"+jobname+"_%J.stdout\n")
+  f.write("#BSUB -eo "+jobfolder+"/logs/"+jobname+"_%J.stderr\n")
   f.write("\n")
   f.write("source /home/hsud3/.bash_profile\n")
   f.write("cd /home/hsud3/vnet-tensorflow \n")
