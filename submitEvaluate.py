@@ -6,32 +6,49 @@ import numpy as np
 # DGH note to self: add option to split this into N/10 GPU jobs or something?
 
 useGpu=True
+#useGpu=True
 
 jobfolder = "./jobs/"
-data_dir = '/data/deasy/DylanHsu/N200_1mm3/nifti'
-patch_size  = 32 
-patch_layer = 32 
-stride_inplane = 4
-stride_layer   = 4
+#data_dir = '/data/deasy/DylanHsu/N200_1mm3/nifti'
+patch_size  = 48 
+patch_layer = 48 
+stride_inplane = 48
+#stride_layer   = 4
+stride_layer   = stride_inplane
 
-suffix='-scanSizeV1mm3-bs1000-dr0p50-32mm'
-checkpoint_path='tmp/ckpt/bak/checkpoint_n200-scanSizeV1mm3-bs1000-dr0p50-32mm-1440'
-#suffix='-scanSizeV1mm3-bs1000-dr0p50-40mm'
-#checkpoint_path='tmp/ckpt/bak/checkpoint_n200-scanSizeV1mm3-bs1000-dr0p50-40mm-1776'
-#suffix='-scanSizeV1mm3-bs1000-dr0p50-48mm'
-#checkpoint_path='tmp/ckpt/bak/checkpoint_n200-scanSizeV1mm3-bs1000-dr0p50-48mm-1200'
-#suffix='-scanSizeV1mm3-bs1000-dr0p50-56mm'
-#checkpoint_path='tmp/ckpt/bak/checkpoint_n200-scanSizeV1mm3-bs1000-dr0p50-56mm-1216'
-#suffix='-scanSizeV1mm3-bs1000-dr0p50-64mm'
-#checkpoint_path='tmp/ckpt/bak/checkpoint_n200-scanSizeV1mm3-bs1000-dr0p50-64mm-992'
+#subgroup=5
+#data_dir = '/data/deasy/DylanHsu/N401_unstripped/subgroup%d/testing'%subgroup
+#suffix = '-48mm-noSmallBias-subgroup%d'%subgroup
+#checkpoint_path='tmp/ckpt/checkpoint_n401-48mm-noSmallBias-subgroup%d-1073'%subgroup
+
+#sg=1; checkpoint_path='tmp/ckpt/bak/checkpoint_n401-48mm-minSmall5x-subgroup1-1484'
+#sg=2; checkpoint_path='tmp/ckpt/bak/checkpoint_n401-48mm-minSmall5x-subgroup2-1470'
+#sg=3; checkpoint_path='tmp/ckpt/bak/checkpoint_n401-48mm-minSmall5x-subgroup3-1456'
+#sg=4; checkpoint_path='tmp/ckpt/bak/checkpoint_n401-48mm-minSmall5x-subgroup4-1470'
+sg=5; checkpoint_path='tmp/ckpt/bak/checkpoint_n401-48mm-minSmall5x-subgroup5-1560'
+#sg=1; checkpoint_path='tmp/ckpt/bak/checkpoint_n401-48mm-noSmallBias-subgroup1-1566'
+#sg=2; checkpoint_path='tmp/ckpt/bak/checkpoint_n401-48mm-noSmallBias-subgroup2-1508'
+#sg=3; checkpoint_path='tmp/ckpt/bak/checkpoint_n401-48mm-noSmallBias-subgroup3-1566'
+#sg=4; checkpoint_path='tmp/ckpt/bak/checkpoint_n401-48mm-noSmallBias-subgroup4-1421'
+#sg=5; checkpoint_path='tmp/ckpt/bak/checkpoint_n401-48mm-noSmallBias-subgroup5-1450'
+suffix = '-48mm-minSmall5x-subgroup%d-stride%d'%(sg,stride_inplane)
+#suffix = '-48mm-noSmallBias-subgroup%d'
+data_dir='/data/deasy/DylanHsu/N401_unstripped/subgroup%d/testing'%(sg)
+
+
 
 model_path = checkpoint_path + '.meta'
+
+try:
+  os.makedirs(os.path.join(jobfolder,'logs'))
+except:
+  pass
 
 if useGpu:
   cpu_cores=1
   cpu_ram=16
 else:
-  cpu_cores = 16
+  cpu_cores = 32
   cpu_ram = 16
 for case in os.listdir(data_dir):
   jobname = 'evaluate%s-%s'%(suffix,case)
@@ -47,10 +64,10 @@ for case in os.listdir(data_dir):
   else:
     f.write("#BSUB -q cpuqueue\n")
   f.write("#BSUB -R span[hosts=1]\n")
-  f.write("#BSUB -R rusage[mem=%d]\n" % (cpu_ram//cpu_cores))
+  f.write("#BSUB -R rusage[mem=%d]\n" % (cpu_ram/cpu_cores))
   f.write("#BSUB -W 24:00\n")
-  f.write("#BSUB -o "+jobfolder+"%J.stdout\n")
-  f.write("#BSUB -eo "+jobfolder+"%J.stderr\n")
+  f.write("#BSUB -o " +jobfolder+"/logs/"+jobname+"_%J.stdout\n")
+  f.write("#BSUB -eo "+jobfolder+"/logs/"+jobname+"_%J.stderr\n")
   f.write("\n")
   f.write("source /home/hsud3/.bash_profile\n")
   f.write("cd /home/hsud3/vnet-tensorflow \n")

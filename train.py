@@ -42,6 +42,10 @@ tf.app.flags.DEFINE_integer('accum_batches',1,
     """Accumulate the gradient over this many batches before updating the gradient (1 = no accumulation)""")               
 tf.app.flags.DEFINE_integer('num_crops',1,
     """Take this many crops from each image, per epoch""")               
+tf.app.flags.DEFINE_integer('small_bias',1,
+    """Bias factor by which to overrepresent cases with small CCs""")
+tf.app.flags.DEFINE_float('small_bias_diameter',10.0,
+    """Definition of small CCs [mm]""")
 tf.app.flags.DEFINE_float('ccrop_sigma',2.5,
     """Value of sigma to use for confidence crops""")               
 tf.app.flags.DEFINE_integer('num_channels',1,
@@ -99,9 +103,15 @@ tf.app.flags.DEFINE_float('dropout_keepprob',1.0,
     """probability to randomly keep a parameter for dropout (default 1 = no dropout)""")
 tf.app.flags.DEFINE_float('l2_weight',0.0,
     """Weight for L2 regularization (should be order of 0.0001)""")
+
 tf.app.flags.DEFINE_boolean('use_weighted_dice',False,
     """Use weighted dice""")
-
+tf.app.flags.DEFINE_float('weighted_dice_kD',1.0,
+    """Weight for the Diameter term in the Weighted-Dice paradigm.""")
+tf.app.flags.DEFINE_float('weighted_dice_kI',5.0,
+    """Weight for the Intensity term in the Weighted-Dice paradigm.""")
+tf.app.flags.DEFINE_boolean('use_gauss_filter',False,
+    """Use trainable gaussian kernel filter after last CNN layer""")
 # tf.app.flags.DEFINE_float('class_weight',0.15,
 #     """The weight used for imbalanced classes data. Currently only apply on binary segmentation class (weight for 0th class, (1-weight) for 1st class)""")
 
@@ -228,11 +238,11 @@ def train():
         # Force input pipepline to CPU:0 to avoid operations sometimes ended up at GPU and resulting a slow down
         with tf.device('/cpu:0'):
             # create transformations to image and labels
+
             trainTransforms = [
                 #NiftiDataset.RandomHistoMatch(train_data_dir, FLAGS.image_filename, 1.0),
                 #NiftiDataset.StatisticalNormalization(5.0, 5.0, nonzero_only=True),
                 #NiftiDataset.BSplineDeformation(),
-                #NiftiDataset.DifficultyIndex((FLAGS.patch_size, FLAGS.patch_size, FLAGS.patch_layer), kD=5.0, kI=1.0),
                 NiftiDataset.RandomCrop((FLAGS.patch_size, FLAGS.patch_size, FLAGS.patch_layer),FLAGS.drop_ratio,FLAGS.min_pixel),
                 NiftiDataset.RandomNoise(),
                 NiftiDataset.RandomFlip(0.5, [True,True,True]),
@@ -246,6 +256,8 @@ def train():
                 # NiftiDataset.Normalization(),
                 #NiftiDataset.Resample((0.45,0.45,0.45)),
                 ]
+            if FLAGS.use_weighted_dice is True:
+                trainTransforms = [NiftiDataset.DifficultyIndex((FLAGS.patch_size, FLAGS.patch_size, FLAGS.patch_layer), FLAGS.weighted_dice_kD, FLAGS.weighted_dice_kI)] + trainTransforms
             testTransforms = [
                 NiftiDataset.StatisticalNormalization(5.0, 5.0, nonzero_only=True, zero_floor=True),
                 NiftiDataset.RandomCrop((FLAGS.patch_size, FLAGS.patch_size, FLAGS.patch_layer),0.5,FLAGS.min_pixel),
@@ -257,13 +269,17 @@ def train():
                 label_filename=FLAGS.label_filename,
                 transforms=trainTransforms,
                 num_crops=FLAGS.num_crops,
-                train=True
+                train=True,
+                small_bias=FLAGS.small_bias,
+                small_bias_diameter=FLAGS.small_bias_diameter
                 #peek_dir='data/peek_train'
                 )
             
             trainDataset = TrainDataset.get_dataset()
             # Here there are batches of size num_crops, unbatch and shuffle
             trainDataset = trainDataset.apply(tf.contrib.data.unbatch())
+            if FLAGS.small_bias is not 1:
+              trainDataset = trainDataset.shuffle(buffer_size=FLAGS.shuffle_buffer_size)
             #trainDataset = trainDataset.repeat(3) 
             trainDataset = trainDataset.batch(FLAGS.batch_size)
             trainDataset = trainDataset.prefetch(5)
@@ -303,7 +319,8 @@ def train():
                 num_levels=len(convs)-1,    
                 num_convolutions= tuple(convs[0:-1]),
                 bottom_convolutions= convs[-1], 
-                activation_fn="prelu") 
+                activation_fn="prelu",
+                gauss_filter=FLAGS.use_gauss_filter) 
 
             logits = model.network_fn(images_placeholder)
 
@@ -708,7 +725,8 @@ def train():
           checkpoint_slug = checkpoint_slug + "_" + FLAGS.batch_job_name
         checkpoint_prefix = os.path.join(FLAGS.checkpoint_dir, checkpoint_slug)
         print("Setting up Saver...")
-        saver = tf.train.Saver(keep_checkpoint_every_n_hours=8,max_to_keep=1)
+        #saver = tf.train.Saver(keep_checkpoint_every_n_hours=8,max_to_keep=1)
+        saver = tf.train.Saver(max_to_keep=50)
 
         #config = tf.ConfigProto(device_count={"CPU": 4})
         config = tf.ConfigProto()

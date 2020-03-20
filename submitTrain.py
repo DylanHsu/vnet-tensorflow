@@ -12,7 +12,8 @@ cpu_ram = 16
 #box_sizes = [16, 24, 32, 48, 64]
 learning_rates = [0.1]
 #box_sizes = [ [64,32], [80,40], [96,48], [112,56], [128,64] ]
-box_sizes = [ [32,32], [40,40], [48,48], [56,56], [64,64] ]
+#box_sizes = [ [32,32], [40,40], [48,48], [56,56], [64,64] ]
+box_sizes = [ [48,48] ]
 #drop_ratios = [0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9]
 drop_ratios = [0.5]
 
@@ -77,7 +78,7 @@ for config in configs:
   f.write("  --num_channels 1")
   f.write("  --epochs 500")
   f.write("  --batch_size 1")
-  f.write("  --accum_batches 1000")
+  f.write("  --accum_batches 250")
   #f.write("  --num_crops %d" % config['nc'])
   f.write("  --num_crops 1")
   f.write("  --image_filename img.nii.gz")
@@ -89,7 +90,7 @@ for config in configs:
   f.write("  --loss_function specific_dice")
   #f.write("  --loss_function wce")
   f.write("  --optimizer adam")
-  f.write("  --data_dir /data/deasy/DylanHsu/N200_1mm3/augcache")
+  f.write("  --data_dir /data/deasy/DylanHsu/N401_unstripped/augcache")
   #f.write("  --wce_weight %d" % config['w'])
   f.write("  --drop_ratio %f\n" % config['dr'])
   #f.write("  --ccrop_sigma %.2f" % config['ccs'])
@@ -98,4 +99,4 @@ for config in configs:
 # Submit jobs.
 for config in configs:
   the_command = "bsub < " + config['jobfile']
-  os.system(the_command)
+  #os.system(the_command)

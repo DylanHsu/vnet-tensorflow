@@ -20,6 +20,7 @@ class NiftiDataset(object):
     peek_dir (string): Place to write images after the transforms for debugging.
 
   """
+# update above section descriptions
 
   def __init__(self,
     data_dir = '',
@@ -28,7 +29,12 @@ class NiftiDataset(object):
     transforms=None,
     num_crops=1,
     train=False,
-    peek_dir = ''):
+    peek_dir = '',
+    small_bias=1,
+    small_bias_diameter=10.,
+    bounding_boxes=False,
+    bb_slice_axis=2,
+    bb_slices=1):
 
     # Init membership variables
     self.data_dir = data_dir
@@ -38,11 +44,17 @@ class NiftiDataset(object):
     self.train = train
     self.num_crops = num_crops
     self.peek_dir = peek_dir
+    self.small_bias = small_bias
+    self.small_bias_diameter = small_bias_diameter
+    self.bounding_boxes = bounding_boxes
+    self.bb_slice_axis = 2
+    self.bb_slices = 1
 
     self.profile = {}
     if self.transforms:
       for transform in self.transforms:
         self.profile[type(transform)] = 0.0
+  
   def get_dataset(self):
     image_paths = []
     label_paths = []
@@ -52,13 +64,17 @@ class NiftiDataset(object):
       label_paths.append(os.path.join(self.data_dir,case,self.label_filename))
 
     dataset = tf.data.Dataset.from_tensor_slices((image_paths,label_paths))
-
     dataset = dataset.shuffle(buffer_size=len(cases))
-    dataset = dataset.map(lambda image_path, label_path: tuple(tf.py_func(
-      self.input_parser, [image_path, label_path], [tf.float32,tf.int32])), num_parallel_calls=4)
+    
+    if self.bounding_boxes is True: # I believe this is optimal since get_dataset only called once
+      dataset = dataset.map(lambda image_path, label_path: tuple(tf.py_func(
+        self.bb_input_parser, [image_path, label_path], [tf.float32,tf.float32])), num_parallel_calls=4)
+    else:
+      dataset = dataset.map(lambda image_path, label_path: tuple(tf.py_func(
+        self.input_parser, [image_path, label_path], [tf.float32,tf.int32])), num_parallel_calls=4)
 
     self.dataset = dataset
-    self.data_size = len(image_paths)
+    self.data_size = len(image_paths) # This is currently inaccurate
     return self.dataset
 
   def read_image(self,path):
@@ -68,6 +84,7 @@ class NiftiDataset(object):
     return image
 
   def input_parser(self,image_path, label_path):
+    # Input parser python function which gets wrapped
     # read image and label
     image = self.read_image(image_path.decode("utf-8"))
     castImageFilter = sitk.CastImageFilter()
@@ -119,7 +136,26 @@ class NiftiDataset(object):
    
     images_np=[]
     labels_np=[]
-    for multiple_crops in range(0,self.num_crops):
+    cubicMmPerVoxel = label.GetSpacing()[0] * label.GetSpacing()[1] * label.GetSpacing()[2];
+    num_crops = self.num_crops
+    if self.small_bias is not 1:
+      # Do the connected component analysis to find out if this is small
+      ccFilter = sitk.ConnectedComponentImageFilter()
+      labelCC = ccFilter.Execute(label)
+      labelShapeFilter = sitk.LabelShapeStatisticsImageFilter()
+      labelShapeFilter.SetComputeFeretDiameter(True)
+      labelShapeFilter.Execute(labelCC)
+      avgD = 0.0
+      minD = 999.0
+      for iLabel in range(1,labelShapeFilter.GetNumberOfLabels()+1):
+        avgD += labelShapeFilter.GetFeretDiameter(iLabel)
+        minD = min(minD, labelShapeFilter.GetFeretDiameter(iLabel))
+      if labelShapeFilter.GetNumberOfLabels() > 0:
+        avgD /= float(labelShapeFilter.GetNumberOfLabels())
+        #if avgD < self.small_bias_diameter:
+        if minD < self.small_bias_diameter:
+          num_crops *= self.small_bias
+    for multiple_crops in range(0,num_crops):
       sample_tfm = {'image': itkImages3d.copy(), 'label':label}
       if self.transforms:
         for transform in self.transforms:
@@ -163,6 +199,125 @@ class NiftiDataset(object):
     image_stack = np.stack(images_np)
     label_stack = np.stack(labels_np)
     return image_stack, label_stack
+ 
+  def bb_input_parser(self, image_path, label_path):
+    # Input parser python function which gets wrapped
+    # This version of the function differs greatly and returns a bounding box
+
+    # read image and label
+    image = self.read_image(image_path.decode("utf-8"))
+    castImageFilter = sitk.CastImageFilter()
+    castImageFilter.SetOutputPixelType(sitk.sitkFloat32)
+    # Workaround: convert to 4D Numpy then back to 3D SimpleITK images
+    # This will have length N, where N is the number of (MRI) series
+    itkImages3d = []
+    if len(image.GetSize()) == 3:
+      itkImage3d = castImageFilter.Execute(image)
+      itkImages3d += [itkImage3d]
+    else:
+      # Weird NIFTI convention: Dimension 3 is the index!
+      image_np = sitk.GetArrayFromImage(image)
+      for i in range(image_np.shape[3]): 
+        volume = image_np[:,:,:,i]
+        itkImage3d = sitk.GetImageFromArray(volume)
+        itkImage3d.SetOrigin(image.GetOrigin())
+        itkImage3d.SetSpacing(image.GetSpacing())
+        itkImage3d.SetDirection(image.GetDirection())
+        itkImage3d = castImageFilter.Execute(itkImage3d)
+        itkImages3d += [itkImage3d]
+    
+    if self.train:
+      label = self.read_image(label_path.decode("utf-8"))
+      castImageFilter.SetOutputPixelType(sitk.sitkInt8)
+      label = castImageFilter.Execute(label)
+    else:
+      label = sitk.Image(itkImages3d[0].GetSize(),sitk.sitkInt8)
+      label.SetOrigin(itkImages3d[0].GetOrigin())
+      label.SetSpacing(itkImages3d[0].GetSpacing())
+      label.SetDirection(itkImages3d[0].GetDirection())
+    # Form the sample dict with the list of 3D ITK Images and the label
+    sample = {'image': itkImages3d, 'label':label}
+    
+    
+    sample_tfm = {'image': itkImages3d.copy(), 'label':label}
+    if self.transforms:
+      for transform in self.transforms:
+        sample_tfm = transform(sample_tfm)
+
+    # Now we have to take 3D simple ITK images and make a stack of 2D images with bounding boxes
+    ccFilter = sitk.ConnectedComponentImageFilter()
+    labelCC = ccFilter.Execute(sample_tfm['label'])
+    labelShapeFilter = sitk.LabelShapeStatisticsImageFilter()
+    labelShapeFilter.Execute(labelCC)
+    statisticsFilter = sitk.StatisticsImageFilter()
+    statisticsFilter.Execute(sample_tfm['label'])
+    
+    # For a bounding box network, we can't have images with no ground truth
+    assert labelShapeFilter.GetNumberOfLabels() > 0, "Label at path \"%s\" has dimensions [%d,%d,%d], %d true voxels, and no label CCs"%(label_path, label.GetSize()[0],label.GetSize()[1],label.GetSize()[2],statisticsFilter.GetSum())
+    
+    images_np=[]
+    boxlists_np=[]
+
+    boxes = []
+    # centernet wants [y,x,height,width,class] where y,x are the center of the bounding box
+    for i in range(1,labelShapeFilter.GetNumberOfLabels()+1):
+      # Commented out below is Centroid logic. For now assume that we have already transformed
+      # to the correct 2.5D input size using RandomCrop or ConfidenceCrop.
+      #centroid = sample_tfm['label'].TransformPhysicalPointToIndex(labelShapeFilter.GetCentroid(i))
+      #roiBox = [sample_tfm['label'].GetSize()[0], sample_tfm['label'].GetSize()[1], 1]
+      #roiFilter = sitk.RegionOfInterestImageFilter()
+      #roiFilter.SetSize(roiBox)
+      #roiFilter.SetIndex([0,0,centroid[2]])
+      #label_slice = roiFilter.Execute(sample_tfm['label'])
+      #sliceCC = ccFilter.Execute(label_slice)
+      #sliceShapeFilter = sitk.LabelShapeStatisticsImageFilter()
+      #sliceShapeFilter.Execute(sliceCC)
+      #assert sliceShapeFilter.GetNumberOfLabels()>0
+      #boxes = []
+      #for j in range(1,sliceShapeFilter.GetNumberOfLabels()+1):
+      #  box_3d = sliceShapeFilter.GetBoundingBox(j)
+      #  
+      #  box_2d = [box_3d[1] + float(box_3d[4])/2.,
+      #            box_3d[0] + float(box_3d[3])/2.,
+      #            box_3d[4],
+      #            box_3d[3],
+      #            0 # single class detection -> everything is class 0
+      #           ] 
+      #  boxes += [box_2d]
+      
+      box_3d = labelShapeFilter.GetBoundingBox(i)
+      # "The GetBoundingBox and GetRegion of the LabelShapeStatisticsImageFilter returns a bounding box is as [xstart, ystart, zstart, xsize, ysize, zsize]."
+      # following line is wrong - do not give the corner of the bounding box
+      # box_2d = [box_3d[1], box_3d[0], box_3d[4], box_3d[3],0]
+      # this is right - give the center of the bounding box
+      box_2d = [box_3d[1] + float(box_3d[4])/2.,
+                box_3d[0] + float(box_3d[3])/2.,
+                box_3d[4],
+                box_3d[3],
+                0 # single class detection -> everything is class 0
+               ] 
+      boxes += [box_2d]
+      # need to modify this to account for bb_slice_axis
+    # pad boxes with empty bounding boxes so we can make a sensible square numpy array
+    
+    for j in range(len(boxes),64):
+      boxes.append([-1,-1,-1,-1,0])
+    boxlist_np = np.asarray(boxes, np.float32)
+    
+    image_np = [] # list of (Z,Y,X) arrays 
+    for volume in sample_tfm['image']:
+      image_np += [sitk.GetArrayFromImage(volume)]
+    image_3d = np.asarray(image_np, np.float32) # (T,Z,Y,X) array
+    # need to modify this to account for choice of bb_slice_axis
+    image_3d = np.transpose(image_np,(2,3,1,0)) # (T,Z,Y,X) -> (Y,X,Z,T) 
+    # Make an arbitrary choice on how to stack the Z values and sequences
+    # Last dimension will be (z1c1,z2c1,...,z1c2,z2c2)
+    image_2p5d = image_3d.reshape( (image_3d.shape[0], image_3d.shape[1], image_3d.shape[2]*image_3d.shape[3]) , order='F') 
+    images_np.append(image_2p5d)
+    boxlists_np.append(boxlist_np)
+    images_stack = np.stack(images_np)
+    boxlists_stack = np.stack(boxlists_np)
+    return images_stack, boxlists_stack
 
 class Normalization(object):
   """
@@ -590,16 +745,19 @@ class ConfidenceCrop(object):
     # Assuming that all the volumes in image[:] are the same!
     for i in range(3):
       # edge case
-      if centroid[i] < (self.output_size[i]/2):
+      #if centroid[i] < (self.output_size[i]/2):
+      if centroid[i] < int(self.output_size[i]/2):
         centroid[i] = int(self.output_size[i]/2)
-      elif (image[0].GetSize()[i]-centroid[i]) < (self.output_size[i]/2):
-        centroid[i] = image[0].GetSize()[i] - int(self.output_size[i]/2) -1
+      elif (image[0].GetSize()[i]-centroid[i]) < int(self.output_size[i]/2):
+        #centroid[i] = image[0].GetSize()[i] - int(self.output_size[i]/2) -1
+        centroid[i] = image[0].GetSize()[i] - int(self.output_size[i]/2)
 
       # get start point
       while ((start[i]<0) or (end[i]>(image[0].GetSize()[i]-1))):
         offset[i] = self.NormalOffset(self.output_size[i],self.sigma[i])
         start[i] = centroid[i] + offset[i] - int(self.output_size[i]/2)
         end[i] = start[i] + self.output_size[i] - 1
+        # print(i, start[i], end[i], image[0].GetSize()[i]-1) # debug infinite while loop
 
     roiFilter = sitk.RegionOfInterestImageFilter()
     roiFilter.SetSize(self.output_size)

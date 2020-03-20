@@ -9,36 +9,45 @@ import argparse
 
 parser = argparse.ArgumentParser(description='Scan the optimal probability thresholds for detection & segmentation')
 
-assert len(sys.argv) >= 4, "Not enough arguments"
-suffix    = sys.argv[1]
-data_dir  = sys.argv[2]
-threshold = float(sys.argv[3])
-if len(sys.argv)>=5:
-  seg_threshold = float(sys.argv[4])
-else:
-  seg_threshold = threshold
-writeLabels=False
+#assert len(sys.argv) >= 4, "Not enough arguments"
+#suffix    = sys.argv[1]
+#data_dir  = sys.argv[2]
+#threshold = float(sys.argv[3])
+#if len(sys.argv)>=5:
+#  seg_threshold = float(sys.argv[4])
+#else:
+#  seg_threshold = threshold
+#writeLabels=False
 
-#parser.add_argument('suffix'       , type=str  , help="suffix of the written label files")
-#parser.add_argument('data_dir'     , type=str  , help="location in which the training/testing folders reside")
-#parser.add_argument('threshold'    , type=float, help="threshold for detection")
-#parser.add_argument('seg_threshold', type=float, help="threshold for segmentation")
-#parser.add_argument("--write_labels", help="actually write the label Nifti files", action="store_true")
+parser.add_argument('suffix'       , type=str  , help="suffix of the written label files")
+parser.add_argument('data_dir'     , type=str  , help="location in which the training/testing folders reside")
+parser.add_argument('threshold'    , type=float, help="threshold for detection")
+parser.add_argument('seg_threshold', type=float, help="threshold for segmentation")
+parser.add_argument("--write_labels", help="actually write the label Nifti files", action="store_true")
+parser.add_argument('--dilate_threshold', type=float, help="threshold for dilating with gaussian kernel",default=0.0)
+
 #
-#args = parser.parse_args()
+args = parser.parse_args()
 #if args.write_labels:
 
 image_name = 'img.nii.gz'
 label_name = 'label_smoothed.nii.gz'
-prob_name = 'probability_vnet'+suffix+'.nii.gz'
-stats_dir='/data/deasy/DylanHsu/N200_1mm3/stats'
+prob_name = 'probability_vnet'+'-'+args.suffix+'.nii.gz'
+#stats_dir='/data/deasy/DylanHsu/N200_1mm3/stats/stats'+'-'+args.suffix
+stats_dir='/data/deasy/DylanHsu/N401_unstripped/stats/stats'+'-'+args.suffix
+try:
+  os.makedirs(stats_dir)
+except FileExistsError:
+  pass
 
-for dataset in ['training','testing']:
-  probfiles = glob(os.path.join(data_dir, dataset, '*', prob_name))
+#for dataset in ['training','testing']:
+for dataset in ['testing']:
+  probfiles = glob(os.path.join(args.data_dir, dataset, '*', prob_name))
   cases = [os.path.basename(os.path.dirname(probfile)) for probfile in probfiles]
   #cases = cases[:5]
   random.shuffle(cases) # maximum parallel I/O
   ncases = len(cases)
+  assert ncases>0
   
   avgPatientDice=0
   patientDiceSumSq=0
@@ -57,14 +66,16 @@ for dataset in ['training','testing']:
   globalLesionStats=[]
   for case in cases:
     print('analyzing case',case)
-    image_path = os.path.join(data_dir, dataset, case, 'img.nii.gz')
-    label_path = os.path.join(data_dir, dataset, case, 'label_smoothed.nii.gz')
-    prob_path  = os.path.join(data_dir, dataset, case, prob_name)
+    image_path = os.path.join(args.data_dir, dataset, case, 'img.nii.gz')
+    label_path = os.path.join(args.data_dir, dataset, case, 'label_smoothed.nii.gz')
+    prob_path  = os.path.join(args.data_dir, dataset, case, prob_name)
     
     # Instantiate filters
     aif = sitk.AddImageFilter()
+    btif = sitk.BinaryThresholdImageFilter()
     castImageFilter = sitk.CastImageFilter()
     ccFilter = sitk.ConnectedComponentImageFilter()
+    hdif = sitk.HausdorffDistanceImageFilter()
     mapFilter = sitk.LabelImageToLabelMapFilter()
     mif=sitk.LabelMapMaskImageFilter()
     overlapFilter = sitk.LabelOverlapMeasuresImageFilter()
@@ -73,6 +84,9 @@ for dataset in ['training','testing']:
     sif=sitk.StatisticsImageFilter()
     writer=sitk.ImageFileWriter()
     xif = sitk.MultiplyImageFilter()
+    
+    dgif = sitk.DiscreteGaussianImageFilter()
+    dgif.SetVariance(1)
     
     labelShapeFilter = sitk.LabelShapeStatisticsImageFilter()
     trueLabelShapeFilter = sitk.LabelShapeStatisticsImageFilter()
@@ -91,7 +105,7 @@ for dataset in ['training','testing']:
     softmax = reader.Execute()
     
     #image_np = sitk.GetArrayFromImage(image)
-    softmax_np = np.transpose(sitk.GetArrayFromImage(softmax), (2,1,0))
+    #softmax_np = np.transpose(sitk.GetArrayFromImage(softmax), (2,1,0))
     trueLabel_np = np.transpose(sitk.GetArrayFromImage(trueLabel), (2,1,0))
   
     # True label computations for connected component analysis
@@ -100,13 +114,14 @@ for dataset in ['training','testing']:
     trueLabelShapeFilter.Execute(trueLabelCC)
     trueLabelMap=mapFilter.Execute(trueLabelCC,0)
       
-    label_np = np.where(softmax_np > float(threshold), 1,0)
+    #label_np = np.where(softmax_np > float(args.threshold), 1,0)
   
     # Create SITK label mask for this threshold
-    label = sitk.GetImageFromArray(np.transpose(label_np, (2,1,0)))
-    label.SetSpacing(trueLabel.GetSpacing())
-    label.SetOrigin(trueLabel.GetOrigin())
-    label.SetDirection(trueLabel.GetDirection())
+    #label = sitk.GetImageFromArray(np.transpose(label_np, (2,1,0)))
+    #label.SetSpacing(trueLabel.GetSpacing())
+    #label.SetOrigin(trueLabel.GetOrigin())
+    #label.SetDirection(trueLabel.GetDirection())
+    label = btif.Execute(softmax, float(args.threshold), 1e6, 1, 0)
     castImageFilter.SetOutputPixelType( sitk.sitkInt16 ) # need to have same pixel type for overlapFilter
     label = castImageFilter.Execute(label)
     
@@ -129,7 +144,7 @@ for dataset in ['training','testing']:
       #  nonartifacts.remove(j)
     
     # Compute patient dice for this threshold and patient
-    if seg_threshold == threshold:
+    if args.seg_threshold == args.threshold:
       overlapFilter.Execute(label, trueLabel)
       patient_dice = overlapFilter.GetDiceCoefficient()
       seededSegLabel = label
@@ -137,13 +152,14 @@ for dataset in ['training','testing']:
       # Build a Segmentation mask by using the detections as seeds
       # and considering voxels connected to those seeds with a reasonable probability
       # to be the segmentation prediction.
-      segLabel_np = np.where(softmax_np > float(seg_threshold), 1,0)
+      #segLabel_np = np.where(softmax_np > float(args.seg_threshold), 1,0)
   
       # Create SITK label mask for this threshold
-      segLabel = sitk.GetImageFromArray(np.transpose(segLabel_np, (2,1,0)))
-      segLabel.SetSpacing(trueLabel.GetSpacing())
-      segLabel.SetOrigin(trueLabel.GetOrigin())
-      segLabel.SetDirection(trueLabel.GetDirection())
+      #segLabel = sitk.GetImageFromArray(np.transpose(segLabel_np, (2,1,0)))
+      #segLabel.SetSpacing(trueLabel.GetSpacing())
+      #segLabel.SetOrigin(trueLabel.GetOrigin())
+      #segLabel.SetDirection(trueLabel.GetDirection())
+      segLabel = btif.Execute(softmax, float(args.seg_threshold), 1e6, 1, 0)
       castImageFilter.SetOutputPixelType( sitk.sitkInt16 ) # need to have same pixel type for overlapFilter
       segLabel = castImageFilter.Execute(segLabel)
       
@@ -170,6 +186,12 @@ for dataset in ['training','testing']:
             break
 
 
+      if args.dilate_threshold > 0.0:
+        castImageFilter.SetOutputPixelType( sitk.sitkFloat32 )
+        blurredSeededSegLabel = dgif.Execute(castImageFilter.Execute(seededSegLabel))
+        seededSegLabel = btif.Execute(blurredSeededSegLabel, float(args.dilate_threshold), 1e6, 1, 0)
+        castImageFilter.SetOutputPixelType( sitk.sitkInt16 )
+        seededSegLabel = castImageFilter.Execute(seededSegLabel) 
       overlapFilter.Execute(seededSegLabel, trueLabel)
       patient_dice = overlapFilter.GetDiceCoefficient()
 
@@ -223,10 +245,15 @@ for dataset in ['training','testing']:
               totalPrediction = aif.Execute(totalPrediction, mif.Execute(seededSegLabelMap, seededSegLabel))
           overlapFilter.Execute(totalPrediction, true_lesion)
           specificDice = overlapFilter.GetDiceCoefficient()
+          hdif.Execute(true_lesion, totalPrediction)
+          hausdorffDistance = hdif.GetHausdorffDistance()
+
         else:
           specificDice=0.
+          hausdorffDistance=999.
       else:
         specificDice=0.
+        hausdorffDistance=999.
       statFilter.Execute(true_lesion)
       volumetricDiameter = ((cubicMmPerVoxel * 6.*statFilter.GetSum()/3.14159) ** (1./3.))
       feretDiameter=trueLabelShapeFilter.GetFeretDiameter(i)
@@ -236,6 +263,7 @@ for dataset in ['training','testing']:
         'feretDiameter'      : feretDiameter,
         'volumetricDiameter' : volumetricDiameter,
         'specificDice'       : specificDice,
+        'hausdorffDistance'  : hausdorffDistance,
       }
       patientLesionStats.append(lesionStatsDict)
     globalLesionStats += patientLesionStats
@@ -279,18 +307,18 @@ for dataset in ['training','testing']:
     tnvTotal += tnv
     fnvTotal += fnv
 
-    if writeLabels:
-      seededSegLabelFileName = 'label-seed%.3f-seg%.3f%s'%(threshold,seg_threshold,suffix)
+    if args.write_labels:
+      seededSegLabelFileName = 'label-seed%.3f-seg%.3f-%s'%(args.threshold,args.seg_threshold,args.suffix)
       seededSegLabelFileName = seededSegLabelFileName.replace(".","p") + ".nii.gz"
-      seededSegLabelPath = os.path.join(data_dir, dataset, case, seededSegLabelFileName)
+      seededSegLabelPath = os.path.join(args.data_dir, dataset, case, seededSegLabelFileName)
       writer.SetFileName(seededSegLabelPath)
       castImageFilter.SetOutputPixelType( sitk.sitkInt16 )
       seededSegLabel=castImageFilter.Execute(seededSegLabel)
       writer.Execute(seededSegLabel)
-      diceFileName = 'dice-seed%.3f-seg%.3f%s'%(threshold,seg_threshold,suffix)
+      diceFileName = 'dice-seed%.3f-seg%.3f-%s'%(args.threshold,args.seg_threshold,args.suffix)
       diceFileName = diceFileName.replace(".","p") + ".txt"
-      dicePath = os.path.join(data_dir,dataset,case,diceFileName)
-      f_dice = open(dicePath)
+      dicePath = os.path.join(args.data_dir,dataset,case,diceFileName)
+      f_dice = open(dicePath,'w')
       f_dice.write("%s %.3f %d %d\n"%(case, patient_dice, len(falsePositivesList), len(falseNegativesList)))
       f_dice.close()
 
@@ -318,36 +346,42 @@ for dataset in ['training','testing']:
     fnmRelativeErrorSq = 1./float(fnmSum)
   detEffError = sqrt( tpmRelativeErrorSq + fnmRelativeErrorSq )*detEff/(detEff+1.)
   
-  filename = 'lesions_%s-seed%.3f-seg%.3f%s'%(dataset,threshold,seg_threshold,suffix)
+  filename = 'lesions_%s-seed%.3f-seg%.3f-%s'%(dataset,args.threshold,args.seg_threshold,args.suffix)
   filename = filename.replace(".","p")
   filename += ".txt"
   f_lesions = open(os.path.join(stats_dir, filename),'w')
   avgLesionDice = 0.
+  avgLesionHausdorff = 0.
   lesionDiceSumSq = 0.
+  lesionHausdorffSumSq = 0.
   n_lesions=0
   for lesion in globalLesionStats:
-    f_lesions.write("%s %d %.3f %.3f %.3f\n"%(lesion['case'],lesion['index'],lesion['feretDiameter'],lesion['volumetricDiameter'],lesion['specificDice']))
+    f_lesions.write("%s %d %.3f %.3f %.3f %.3f\n"%(lesion['case'],lesion['index'],lesion['feretDiameter'],lesion['volumetricDiameter'],lesion['specificDice'],lesion['hausdorffDistance']))
     if lesion['specificDice'] > 0:
       avgLesionDice += lesion['specificDice']
-      lesionDiceSumSq += lesion['specificDice'] * lesion['specificDice']
+      avgLesionHausdorff += lesion['hausdorffDistance']
+      lesionDiceSumSq += lesion['specificDice']**2
+      lesionHausdorffSumSq += lesion['hausdorffDistance']**2
       n_lesions+=1
   f_lesions.close()
   
   if n_lesions > 0:
     avgLesionDice /= float(n_lesions)
+    avgLesionHausdorff /= float(n_lesions)
     avgLesionDiceError = sqrt( lesionDiceSumSq/float(n_lesions) - avgLesionDice**2)
+    avgLesionHausdorffError = sqrt( lesionHausdorffSumSq/float(n_lesions) - avgLesionHausdorff**2)
   else:
     avgLesionDice = 0.
     avgLesionDiceError = 0.
   
-  filename = 'stats_%s-seed%.3f-seg%.3f%s'%(dataset,threshold,seg_threshold,suffix)
+  filename = 'stats_%s-seed%.3f-seg%.3f-%s'%(dataset,args.threshold,args.seg_threshold,args.suffix)
   filename = filename.replace(".","p")
   filename += ".txt"
   f_stats = open(os.path.join(stats_dir, filename),'w')
   # header
-  # threshold seg_threshold avgPatientDice avgPatientDiceError detEff detEffError avgLesionDice avgLesionDiceError patientFpm patientFpmError patientFnm patientFnmError patientTpm patientTpmError avgPatientSensitivity avgPatientSpecificity tpvTotal fpvTotal tnvTotal fnvTotal
-  statsTuple = (threshold,seg_threshold, avgPatientDice,avgPatientDiceError,detEff,detEffError,avgLesionDice,avgLesionDiceError,patientFpm,patientFpmError,patientFnm,patientFnmError,patientTpm,patientTpmError,avgPatientSensitivity,avgPatientSpecificity,tpvTotal,fpvTotal,tnvTotal,fnvTotal)
-  f_stats.write("%.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f %.6f %.6f %d %d %d %d\n"%(statsTuple))
+  # threshold seg_threshold avgPatientDice avgPatientDiceError detEff detEffError avgLesionDice avgLesionDiceError avgLesionHausdorff, avgLesionHausdorffError patientFpm patientFpmError patientFnm patientFnmError patientTpm patientTpmError avgPatientSensitivity avgPatientSpecificity tpvTotal fpvTotal tnvTotal fnvTotal
+  statsTuple = (args.threshold,args.seg_threshold, avgPatientDice,avgPatientDiceError,detEff,detEffError,avgLesionDice,avgLesionDiceError,avgLesionHausdorff,avgLesionHausdorffError,patientFpm,patientFpmError,patientFnm,patientFnmError,patientTpm,patientTpmError,avgPatientSensitivity,avgPatientSpecificity,tpvTotal,fpvTotal,tnvTotal,fnvTotal)
+  f_stats.write("%.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f %.6f %.6f %d %d %d %d\n"%(statsTuple))
   f_stats.close()
 
 
