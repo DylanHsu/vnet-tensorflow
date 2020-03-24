@@ -32,7 +32,7 @@ for name in list(FLAGS):
       delattr(FLAGS,name)
 tf.app.flags.DEFINE_string('data_dir', './data',
     """Directory of stored data.""")
-tf.app.flags.DEFINE_string('image_filename','mr1.nii.gz,ct.nii.gz',
+tf.app.flags.DEFINE_string('image_filenames','mr1.nii.gz,ct.nii.gz',
     """Image filename""")
 tf.app.flags.DEFINE_string('label_filename','label.nii.gz',
     """Label filename""")
@@ -40,6 +40,8 @@ tf.app.flags.DEFINE_integer('batch_size',1,
     """Size of batch""")               
 tf.app.flags.DEFINE_integer('accum_batches',1,
     """Accumulate the gradient over this many batches before updating the gradient (1 = no accumulation)""")               
+tf.app.flags.DEFINE_integer('accum_batches_per_epoch',15,
+    """Accumulated batches per epoch""")               
 tf.app.flags.DEFINE_integer('num_crops',1,
     """Take this many crops from each image, per epoch""")               
 tf.app.flags.DEFINE_integer('small_bias',1,
@@ -54,7 +56,7 @@ tf.app.flags.DEFINE_integer('patch_size',128,
     """Size of a data patch""")
 tf.app.flags.DEFINE_integer('patch_layer',128,
     """Number of layers in data patch""")
-tf.app.flags.DEFINE_integer('epochs',999999999,
+tf.app.flags.DEFINE_integer('epochs',500,
     """Number of epochs for training""")
 tf.app.flags.DEFINE_string('log_dir', './tmp/log',
     """Directory where to write training and testing event logs """)
@@ -264,7 +266,7 @@ def train():
             
             TrainDataset = NiftiDataset.NiftiDataset(
                 data_dir=train_data_dir,
-                image_filenames=FLAGS.image_filename,
+                image_filenames=FLAGS.image_filenames,
                 label_filename=FLAGS.label_filename,
                 transforms=trainTransforms,
                 num_crops=FLAGS.num_crops,
@@ -279,7 +281,7 @@ def train():
             trainDataset = trainDataset.apply(tf.contrib.data.unbatch())
             if FLAGS.small_bias is not 1:
               trainDataset = trainDataset.shuffle(buffer_size=FLAGS.shuffle_buffer_size)
-            #trainDataset = trainDataset.repeat(3) 
+            trainDataset = trainDataset.repeat() 
             trainDataset = trainDataset.batch(FLAGS.batch_size)
             trainDataset = trainDataset.prefetch(5)
             #trainDataset = trainDataset.apply(tf.contrib.data.prefetch_to_device('/gpu:0'))
@@ -287,7 +289,7 @@ def train():
 
             TestDataset = NiftiDataset.NiftiDataset(
                 data_dir=test_data_dir,
-                image_filenames=FLAGS.image_filename,
+                image_filenames=FLAGS.image_filenames,
                 label_filename=FLAGS.label_filename,
                 transforms=testTransforms,
                 num_crops=FLAGS.num_crops, #10
@@ -298,7 +300,7 @@ def train():
             testDataset = TestDataset.get_dataset()
             # Here there are batches of size num_crops, unbatch and shuffle
             testDataset = testDataset.apply(tf.contrib.data.unbatch())
-            testDataset = testDataset.repeat(10)
+            testDataset = testDataset.repeat()
             testDataset = testDataset.batch(FLAGS.batch_size)
             testDataset = testDataset.prefetch(5)
             #testDataset = testDataset.apply(tf.contrib.data.prefetch_to_device('/gpu:0'))
@@ -725,7 +727,7 @@ def train():
         checkpoint_prefix = os.path.join(FLAGS.checkpoint_dir, checkpoint_slug)
         print("Setting up Saver...")
         #saver = tf.train.Saver(keep_checkpoint_every_n_hours=8,max_to_keep=1)
-        saver = tf.train.Saver(max_to_keep=50)
+        saver = tf.train.Saver(max_to_keep=3)
 
         #config = tf.ConfigProto(device_count={"CPU": 4})
         config = tf.ConfigProto()
@@ -782,11 +784,13 @@ def train():
               #sess.run(sum_zero_op) # reset loss-averaging
               model.is_training = True;
               logger.debug('Beginning accumulation batch')
-              while True: # Beginning of Accumulation batch
-                try:
+              #while True: # Beginning of Accumulation batch
+              #  try:
+              for accum_batch in range(FLAGS.accum_batches_per_epoch):
                   logger.debug('Beginning loop over the accumulation crops')
                   n_train = int(sess.run(n_ab))
-                  [image, label] = sess.run(next_element_train)
+                  #[image, label] = sess.run(next_element_train)
+                  
                   # add rounding here
                   #difficulty_map = label
                   
@@ -795,10 +799,11 @@ def train():
                   sess.run(sum_zero_op) # reset loss-averaging
 
                   for i in range(n_accum_crops):
+                    [image, label] = sess.run(next_element_train)
                     image = image[:,:,:,:,:] #image[:,:,:,:,np.newaxis]
                     label = label[:,:,:,:,np.newaxis]
                     train, train_loss, sum_accum = sess.run([accum_op, loss_fn, sum_accum_op], feed_dict={images_placeholder: image, labels_placeholder: label})
-                    [image, label] = sess.run(next_element_train)
+                    #[image, label] = sess.run(next_element_train)
                   n_train = int(sess.run(n_ab))
 
                   logger.debug("Applying gradients after total %d accumulations"%n_train)
@@ -811,6 +816,7 @@ def train():
                   logger.debug('Applying summary op')
                   summary = sess.run(summary_op)
                   train_summary_writer.add_summary(summary, global_step=tf.train.global_step(sess, global_step))
+              '''
                 except tf.errors.OutOfRangeError:
                   # We could compute the accumulated gradient even if we didn't run over a full set of n_batches
                   # This can explode the gradients, especially if i=0 at the time of this exception
@@ -842,6 +848,22 @@ def train():
                 except MemoryError:
                   logger.error("Terminating due to exceeded memory limit. I am justly killed with mine own treachery!")
                   sys.exit(1)
+                '''
+              # Compute the average training loss across all batches in the epoch.
+              train_loss_avg = sess.run(loss_avg)
+              
+              print("{0}: Average training loss is {1:.3f} over {2:d}".format(datetime.datetime.now(), train_loss_avg, n_train))
+              start_epoch_inc.op.run()
+              # print(start_epoch.eval())
+              # save the model at end of each epoch training
+              print("{}: Saving checkpoint of epoch {} at {}...".format(datetime.datetime.now(),epoch+1,FLAGS.checkpoint_dir))
+              if not (os.path.exists(FLAGS.checkpoint_dir)):
+                  os.makedirs(FLAGS.checkpoint_dir,exist_ok=True)
+
+              saver.save(sess, checkpoint_prefix, 
+                  global_step=tf.train.global_step(sess, global_step),
+                  latest_filename=latest_filename)
+              print("{}: Saving checkpoint succeed".format(datetime.datetime.now()))
               
               print('profile\n',TrainDataset.profile)
 
@@ -852,19 +874,21 @@ def train():
               logger.debug('Zeroing gradients and loss sums')
               sess.run(zero_op) # reset gradient accumulation
               sess.run(sum_zero_op) # reset loss-averaging
-              while True:
-                try:
+              #while True:
+              #  try:
+              model.is_training = False;
+              for i in range(n_accum_crops):
                   [image, label] = sess.run(next_element_test)
 
                   image = image[:,:,:,:,:] #image[:,:,:,:,np.newaxis]
                   label = label[:,:,:,:,np.newaxis]
                   
-                  model.is_training = False;
+                  #model.is_training = False;
                   test_loss, sum_accum = sess.run([loss_fn, sum_accum_op], feed_dict={images_placeholder: image, labels_placeholder: label})
                   # This is redundant, fix
                   #test_loss_avg += test_loss
                   #n_test += 1
-
+              '''
                 except tf.errors.OutOfRangeError:
                   #test_loss_avg = test_loss_avg / n_test
                   # Compute the average testing loss across the batch
@@ -889,7 +913,26 @@ def train():
                 except MemoryError:
                   logger.error("Terminating due to exceeded memory limit. I am justly killed with mine own treachery!")
                   sys.exit(1)
+                '''
               #n_test = 0
+              # Compute the average testing loss across the batch
+              if (FLAGS.loss_function == "ce"):
+                test_loss_avg = sess.run(ce_avg)
+              elif(FLAGS.loss_function == "wce"):
+                test_loss_avg = sess.run(wce_avg)
+              elif(FLAGS.loss_function == "dwce"):
+                test_loss_avg = sess.run(dwce_avg)
+              elif(FLAGS.loss_function == "dice"):
+                test_loss_avg = sess.run(dice_loss_op)
+              elif(FLAGS.loss_function == "jaccard"):
+                test_loss_avg = sess.run(jaccard_loss_op)
+              elif(FLAGS.loss_function == "specific_dice"):
+                test_loss_avg = sess.run(specific_dice_loss_op)
+              n_test = int(sess.run(n_ab))
+              print("{0}: Average testing loss is {1:.3f} over {2:d}".format(datetime.datetime.now(), test_loss_avg, n_test))
+              summary = sess.run(summary_op)
+              test_summary_writer.add_summary(summary, global_step=tf.train.global_step(sess, global_step))
+
               logger.debug('Zeroing gradients and loss sums')
               sess.run(zero_op) # reset gradient accumulation
               sess.run(sum_zero_op) # reset loss-averaging

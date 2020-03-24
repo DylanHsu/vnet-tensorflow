@@ -11,7 +11,7 @@ class NiftiDataset(object):
   load image-label pair for training, testing and inference.
   Currently only support linear interpolation method
   Args:
-		data_dir (string): Path to data directory.
+	data_dir (string): Path to data directory.
     image_filenames (string|tuple): Filenames of image data, separated by commas or in a tuple.
     label_filename (string): Filename of label data.
     transforms (list): List of SimpleITK image transformations.
