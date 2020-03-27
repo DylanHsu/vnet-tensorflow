@@ -111,7 +111,7 @@ def evaluate():
     # create transformations to image and labels
     transforms = [
         # NiftiDataset.Normalization(),
-        NiftiDataset.StatisticalNormalization(5.0,5.0,nonzero_only=True,zero_floor=True),
+        NiftiDataset.StatisticalNormalization(0,5.0,5.0,nonzero_only=True,zero_floor=True),
         #NiftiDataset.Resample(0.75),
         #NiftiDataset.Padding((FLAGS.patch_size, FLAGS.patch_size, FLAGS.patch_layer))      
         ]

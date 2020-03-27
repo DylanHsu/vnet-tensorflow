@@ -60,7 +60,7 @@ tf.app.flags.DEFINE_integer('epochs',500,
     """Number of epochs for training""")
 tf.app.flags.DEFINE_string('log_dir', './tmp/log',
     """Directory where to write training and testing event logs """)
-tf.app.flags.DEFINE_float('init_learning_rate',1e-2,
+tf.app.flags.DEFINE_float('init_learning_rate',1e-4,
     """Initial learning rate""")
 tf.app.flags.DEFINE_float('decay_factor',0.01,
     """Exponential decay learning rate factor""")
@@ -241,8 +241,9 @@ def train():
 
             trainTransforms = [
                 #NiftiDataset.RandomHistoMatch(train_data_dir, FLAGS.image_filename, 1.0),
-                NiftiDataset.StatisticalNormalization(0, 5.0, 5.0, nonzero_only=True),
+                #NiftiDataset.StatisticalNormalization(0, 5.0, 5.0, nonzero_only=True),
                 #NiftiDataset.BSplineDeformation(),
+                NiftiDataset.ManualNormalization(1, 0, 100.),
                 NiftiDataset.RandomCrop((FLAGS.patch_size, FLAGS.patch_size, FLAGS.patch_layer),FLAGS.drop_ratio,FLAGS.min_pixel),
                 NiftiDataset.RandomNoise(0,0.1),
                 NiftiDataset.RandomFlip(0.5, [True,True,True]),
@@ -261,6 +262,7 @@ def train():
             
             testTransforms = [
                 NiftiDataset.StatisticalNormalization(0, 5.0, 5.0, nonzero_only=True, zero_floor=True),
+                NiftiDataset.ManualNormalization(1, 0, 100.),
                 NiftiDataset.RandomCrop((FLAGS.patch_size, FLAGS.patch_size, FLAGS.patch_layer),0.5,FLAGS.min_pixel),
                 ]
             
@@ -786,9 +788,9 @@ def train():
               logger.debug('Beginning accumulation batch')
               #while True: # Beginning of Accumulation batch
               #  try:
+              batch_train_loss_sum = 0
               for accum_batch in range(FLAGS.accum_batches_per_epoch):
                   logger.debug('Beginning loop over the accumulation crops')
-                  n_train = int(sess.run(n_ab))
                   #[image, label] = sess.run(next_element_train)
                   
                   # add rounding here
@@ -812,6 +814,8 @@ def train():
                     sess.run(compute_gradient_op)
                   sess.run(apply_gradients_op)
                   
+                  batch_train_loss_avg = sess.run(loss_avg)
+                  batch_train_loss_sum += batch_train_loss_avg
                   
                   logger.debug('Applying summary op')
                   summary = sess.run(summary_op)
@@ -850,9 +854,9 @@ def train():
                   sys.exit(1)
                 '''
               # Compute the average training loss across all batches in the epoch.
-              train_loss_avg = sess.run(loss_avg)
+              epoch_train_loss_avg = batch_train_loss_sum / float(FLAGS.accum_batches_per_epoch)
               
-              print("{0}: Average training loss is {1:.3f} over {2:d}".format(datetime.datetime.now(), train_loss_avg, n_train))
+              print("{0}: Average training loss is {1:.3f} over {2:d}".format(datetime.datetime.now(), epoch_train_loss_avg, FLAGS.accum_batches_per_epoch*n_accum_crops))
               start_epoch_inc.op.run()
               # print(start_epoch.eval())
               # save the model at end of each epoch training

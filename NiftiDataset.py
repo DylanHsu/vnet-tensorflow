@@ -359,7 +359,7 @@ class NiftiDataset(object):
     statisticsFilter.Execute(sample_tfm['label'])
     
     # For a bounding box network, we can't have images with no ground truth
-    assert labelShapeFilter.GetNumberOfLabels() > 0, "Label at path \"%s\" has dimensions [%d,%d,%d], %d true voxels, and no label CCs"%(label_path, label.GetSize()[0],label.GetSize()[1],label.GetSize()[2],statisticsFilter.GetSum())
+    assert labelShapeFilter.GetNumberOfLabels() > 0, "Label for case %s has dimensions [%d,%d,%d], %d true voxels, and no label CCs"%(case, label.GetSize()[0],label.GetSize()[1],label.GetSize()[2],statisticsFilter.GetSum())
     
     images_np=[]
     boxlists_np=[]
@@ -492,12 +492,13 @@ class ManualNormalization(object):
   Normalize an image by mapping intensity with given max and min window level
   """
 
-  def __init__(self,windowMin, windowMax):
+  def __init__(self,channel,windowMin, windowMax):
     self.name = 'ManualNormalization'
     assert isinstance(windowMax, (int,float))
     assert isinstance(windowMin, (int,float))
     self.windowMax = windowMax
     self.windowMin = windowMin
+    self.channel = channel
 
   def __call__(self, sample):
     image, label = sample['image'], sample['label']
@@ -506,10 +507,12 @@ class ManualNormalization(object):
     intensityWindowingFilter.SetOutputMinimum(0)
     intensityWindowingFilter.SetWindowMaximum(self.windowMax);
     intensityWindowingFilter.SetWindowMinimum(self.windowMin);
-
-    image[:] = [intensityWindowingFilter.Execute(volume) for volume in image]
-
-    return {'image': image, 'label': label}
+    normalizedImage = image
+    for i,volume in enumerate(image):
+      if i != self.channel:
+        continue
+      normalizedImage[i] = intensityWindowingFilter.Execute(volume)
+    return {'image': normalizedImage, 'label': label}
 
 class Reorient(object):
   """
@@ -572,8 +575,8 @@ class Resample(object):
   def __call__(self, sample):
     image, label = sample['image'], sample['label']
     
-    old_spacing = image[0].GetSpacing()
-    old_size = image[0].GetSize()
+    old_spacing = label.GetSpacing()
+    old_size = label.GetSize()
     
     new_spacing = self.voxel_size
 
@@ -588,8 +591,8 @@ class Resample(object):
     resampler.SetSize(new_size)
 
     # resample on image
-    resampler.SetOutputOrigin(image[0].GetOrigin())
-    resampler.SetOutputDirection(image[0].GetDirection())
+    resampler.SetOutputOrigin(label.GetOrigin())
+    resampler.SetOutputDirection(label.GetDirection())
     image[:] = [resampler.Execute(volume) for volume in image]
 
     # resample on segmentation
@@ -622,7 +625,7 @@ class Padding(object):
 
   def __call__(self,sample):
     image, label = sample['image'], sample['label']
-    size_old = image[0].GetSize()
+    size_old = label.GetSize()
     
     if (size_old[0] >= self.output_size[0]) and (size_old[1] >= self.output_size[1]) and (size_old[2] >= self.output_size[2]):
       return sample
@@ -639,13 +642,13 @@ class Padding(object):
       output_size = tuple(output_size)
 
       resampler = sitk.ResampleImageFilter()
-      resampler.SetOutputSpacing(image[0].GetSpacing())
+      resampler.SetOutputSpacing(label.GetSpacing())
       resampler.SetSize(output_size)
 
       # resample on image
       resampler.SetInterpolator(2)
-      resampler.SetOutputOrigin(image[0].GetOrigin())
-      resampler.SetOutputDirection(image[0].GetDirection())
+      resampler.SetOutputOrigin(label.GetOrigin())
+      resampler.SetOutputDirection(label.GetDirection())
       image[:] = [resampler.Execute(volume) for volume in image]
 
       # resample on label
@@ -691,7 +694,7 @@ class RandomCrop(object):
 
   def __call__(self,sample):
     image, label = sample['image'], sample['label']
-    size_old = image[0].GetSize()
+    size_old = label.GetSize()
     size_new = self.output_size
 
     statFilter = sitk.StatisticsImageFilter()
@@ -841,16 +844,16 @@ class ConfidenceCrop(object):
       #if centroid[i] < (self.output_size[i]/2):
       if centroid[i] < int(self.output_size[i]/2):
         centroid[i] = int(self.output_size[i]/2)
-      elif (image[0].GetSize()[i]-centroid[i]) < int(self.output_size[i]/2):
-        #centroid[i] = image[0].GetSize()[i] - int(self.output_size[i]/2) -1
-        centroid[i] = image[0].GetSize()[i] - int(self.output_size[i]/2)
+      elif (label.GetSize()[i]-centroid[i]) < int(self.output_size[i]/2):
+        #centroid[i] = label.GetSize()[i] - int(self.output_size[i]/2) -1
+        centroid[i] = label.GetSize()[i] - int(self.output_size[i]/2)
 
       # get start point
-      while ((start[i]<0) or (end[i]>(image[0].GetSize()[i]-1))):
+      while ((start[i]<0) or (end[i]>(label.GetSize()[i]-1))):
         offset[i] = self.NormalOffset(self.output_size[i],self.sigma[i])
         start[i] = centroid[i] + offset[i] - int(self.output_size[i]/2)
         end[i] = start[i] + self.output_size[i] - 1
-        # print(i, start[i], end[i], image[0].GetSize()[i]-1) # debug infinite while loop
+        # print(i, start[i], end[i], label.GetSize()[i]-1) # debug infinite while loop
 
     roiFilter = sitk.RegionOfInterestImageFilter()
     roiFilter.SetSize(self.output_size)
@@ -889,11 +892,11 @@ class BSplineDeformation(object):
     image, label = sample['image'], sample['label']
     spline_order = 3
     # Assuming that all the volumes in image[:] are the same!
-    domain_physical_dimensions = [image[0].GetSize()[0]*image[0].GetSpacing()[0],image[0].GetSize()[1]*image[0].GetSpacing()[1],image[0].GetSize()[2]*image[0].GetSpacing()[2]]
+    domain_physical_dimensions = [label.GetSize()[0]*label.GetSpacing()[0],label.GetSize()[1]*label.GetSpacing()[1],label.GetSize()[2]*label.GetSpacing()[2]]
 
     bspline = sitk.BSplineTransform(3, spline_order)
-    bspline.SetTransformDomainOrigin(image[0].GetOrigin())
-    bspline.SetTransformDomainDirection(image[0].GetDirection())
+    bspline.SetTransformDomainOrigin(label.GetOrigin())
+    bspline.SetTransformDomainDirection(label.GetDirection())
     bspline.SetTransformDomainPhysicalDimensions(domain_physical_dimensions)
     bspline.SetTransformDomainMeshSize((10,10,10))
 
@@ -937,7 +940,7 @@ class RandomRotation(object):
     #  selectedLabel = random.randint(1,labelShapeFilter.GetNumberOfLabels())
     #  centroidPP = labelShapeFilter.GetCentroid(selectedLabel)
     #  centroid = label.TransformPhysicalPointToIndex(centroidPP)
-    rot_center = image[0].TransformIndexToPhysicalPoint((image[0].GetSize()[0]//2, image[0].GetSize()[1]//2,image[0].GetSize()[2]//2))
+    rot_center = label.TransformIndexToPhysicalPoint((label.GetSize()[0]//2, label.GetSize()[1]//2,label.GetSize()[2]//2))
     
     # Generate a random rotation direction on the unit sphere
     phi = np.random.uniform(0,np.pi*2)
@@ -958,15 +961,15 @@ class RandomRotation(object):
     # This is more conservative in terms of retaining information but is maybe more memory intensive.
     resampler = sitk.ResampleImageFilter()
     # Perform the interpolation
-    image_size = image[0].GetSize()
+    image_size = label.GetSize()
     reference_size = tuple([math.ceil(i*1.5) for i in list(image_size)])
-    resampler.SetOutputSpacing(image[0].GetSpacing())
+    resampler.SetOutputSpacing(label.GetSpacing())
     resampler.SetSize(reference_size)
     resampler.SetInterpolator(sitk.sitkLinear)
-    resampler.SetOutputOrigin(image[0].GetOrigin())
-    resampler.SetOutputDirection(image[0].GetDirection())
-    reference = resampler.Execute(image[0])
-    reference = image[0]
+    resampler.SetOutputOrigin(label.GetOrigin())
+    resampler.SetOutputDirection(label.GetDirection())
+    #reference = resampler.Execute(label)
+    reference = label
 
     image[:] = [sitk.Resample(volume, reference, rotation, self.interpolator, 0) for volume in image]
     # Label interpolation must be nearest neighbor
@@ -985,6 +988,8 @@ class ThresholdCrop(object):
     self.outside_value = outside_value
 
   def __call__(self, sample):
+    if len(image) == 0:
+      return sample
     image, label = sample['image'], sample['label']
     # Build a composite image from the slices and the label
     # The bounding box must contain the average of the image slices and the label
