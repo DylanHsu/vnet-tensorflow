@@ -53,8 +53,7 @@ class NiftiDataset(object):
     self.small_bias = small_bias
     self.small_bias_diameter = small_bias_diameter
     self.bounding_boxes = bounding_boxes
-    self.bb_slice_axis = 2
-    self.bb_slices = 1
+    self.bb_slice_axis = bb_slice_axis
     self.cpu_threads = cpu_threads
 
     self.profile = {}
@@ -371,17 +370,15 @@ class NiftiDataset(object):
       
       box_3d = labelShapeFilter.GetBoundingBox(i)
       # "The GetBoundingBox and GetRegion of the LabelShapeStatisticsImageFilter returns a bounding box is as [xstart, ystart, zstart, xsize, ysize, zsize]."
-      # following line is wrong - do not give the corner of the bounding box
-      # box_2d = [box_3d[1], box_3d[0], box_3d[4], box_3d[3],0]
-      # this is right - give the center of the bounding box
-      box_2d = [box_3d[1] + float(box_3d[4])/2.,
-                box_3d[0] + float(box_3d[3])/2.,
-                box_3d[4],
-                box_3d[3],
-                0 # single class detection -> everything is class 0
-               ] 
+      # [Center in height dimension, center in width dimension, height, width, class]
+      # single class detection -> everything is class 0 (last entry)
+      if self.bb_slice_axis == 0:
+        box_2d = [box_3d[2] + float(box_3d[5])/2., box_3d[1] + float(box_3d[4])/2., box_3d[5], box_3d[4], 0]
+      elif self.bb_slice_axis == 1:
+        box_2d = [box_3d[2] + float(box_3d[5])/2., box_3d[0] + float(box_3d[3])/2., box_3d[5], box_3d[3], 0]
+      elif self.bb_slice_axis == 2:
+        box_2d = [box_3d[1] + float(box_3d[4])/2., box_3d[0] + float(box_3d[3])/2., box_3d[4], box_3d[3], 0]
       boxes += [box_2d]
-      # need to modify this to account for bb_slice_axis
     # pad boxes with empty bounding boxes so we can make a sensible square numpy array
     
     for j in range(len(boxes),64):
@@ -392,8 +389,17 @@ class NiftiDataset(object):
     for volume in sample_tfm['image']:
       image_np += [sitk.GetArrayFromImage(volume)]
     image_3d = np.asarray(image_np, np.float32) # (T,Z,Y,X) array
-    # need to modify this to account for choice of bb_slice_axis
-    image_3d = np.transpose(image_np,(2,3,1,0)) # (T,Z,Y,X) -> (Y,X,Z,T) 
+
+    # by 2D image conventions, height comes before width
+    # the last two dimensions will be wrapped into the 0.5D channels
+    if self.bb_slice_axis == 0:
+      transpose = (1,2,3,0) # (T,Z,Y,X) -> (Z,Y,X,T)
+    elif self.bb_slice_axis == 1:
+      transpose = (1,3,2,0) # (T,Z,Y,X) -> (Z,X,Y,T)
+    elif self.bb_slice_axis == 2:
+      transpose = (2,3,1,0) # (T,Z,Y,X) -> (Y,X,Z,T)
+    image_3d = np.transpose(image_3d, transpose)
+
     # Make an arbitrary choice on how to stack the Z values and sequences
     # Last dimension will be (z1c1,z2c1,...,z1c2,z2c2)
     image_2p5d = image_3d.reshape( (image_3d.shape[0], image_3d.shape[1], image_3d.shape[2]*image_3d.shape[3]) , order='F') 
