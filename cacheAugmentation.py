@@ -44,14 +44,13 @@ statFilter = sitk.StatisticsImageFilter()
 for iAug in range(1, nAug+1):
   slug = "{0:s}_aug{1:03d}".format(case,iAug)
   
-  #[image_stack, label_stack] = augDataset.input_parser(image_path.encode("utf-8"), label_path.encode("utf-8"))
-  #image_np = image_stack[0,:]
-  #label_np = label_stack[0,:]
   hasTrueVoxels=False
   while not hasTrueVoxels:
     sample_tfm = {'image': images, 'label':label}  
     for transform in augDataset.transforms:
       sample_tfm = transform(sample_tfm)
+      statFilter.Execute(sample_tfm['label'])
+      #print('after', transform, statFilter.GetSum(), 'true voxels')
     statFilter.Execute(sample_tfm['label'])
     if statFilter.GetSum() > 0:
       hasTrueVoxels=True

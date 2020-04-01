@@ -914,7 +914,9 @@ class BSplineDeformation(object):
     bspline.SetParameters(originalControlPointDisplacements)
 
     image[:] = [sitk.Resample(volume, bspline) for volume in image]
-    label = sitk.Resample(label, bspline)
+    #label = sitk.Resample(label, bspline)
+    reference = label
+    label = sitk.Resample(label, reference, bspline, sitk.sitkNearestNeighbor, 0)
     return {'image': image, 'label': label}
 
   def NormalOffset(self,size, sigma):
