@@ -341,6 +341,10 @@ class NiftiDataset(object):
     # Form the sample dict with the list of 3D ITK Images and the label
     sample = {'image': images, 'label':label}
     
+    statisticsFilter = sitk.StatisticsImageFilter()
+    statisticsFilter.Execute(label)
+    voxelsBeforeCrop=statisticsFilter.GetSum()
+
     sample_tfm = {'image': images.copy(), 'label':label}
     if self.transforms:
       for transform in self.transforms:
@@ -354,11 +358,10 @@ class NiftiDataset(object):
     labelCC = ccFilter.Execute(sample_tfm['label'])
     labelShapeFilter = sitk.LabelShapeStatisticsImageFilter()
     labelShapeFilter.Execute(labelCC)
-    statisticsFilter = sitk.StatisticsImageFilter()
     statisticsFilter.Execute(sample_tfm['label'])
     
     # For a bounding box network, we can't have images with no ground truth
-    assert labelShapeFilter.GetNumberOfLabels() > 0, "Label for case %s has dimensions [%d,%d,%d], %d true voxels, and no label CCs"%(case, label.GetSize()[0],label.GetSize()[1],label.GetSize()[2],statisticsFilter.GetSum())
+    assert labelShapeFilter.GetNumberOfLabels() > 0, "Label for case %s has dimensions [%d,%d,%d], %d true voxels, and no label CCs. True voxels before crop = %d"%(case, label.GetSize()[0],label.GetSize()[1],label.GetSize()[2],statisticsFilter.GetSum(),voxelsBeforeCrop)
     
     images_np=[]
     boxlists_np=[]
@@ -994,9 +997,9 @@ class ThresholdCrop(object):
     self.outside_value = outside_value
 
   def __call__(self, sample):
+    image, label = sample['image'], sample['label']
     if len(image) == 0:
       return sample
-    image, label = sample['image'], sample['label']
     # Build a composite image from the slices and the label
     # The bounding box must contain the average of the image slices and the label
     # alternative: could require it contain the sum of the slices
