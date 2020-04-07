@@ -106,6 +106,9 @@ tf.app.flags.DEFINE_float('dropout_keepprob',1.0,
 tf.app.flags.DEFINE_float('l2_weight',0.0,
     """Weight for L2 regularization (should be order of 0.0001)""")
 
+tf.app.flags.DEFINE_string('auxiliary_maps','',
+    """Indices of the images from images_filenames flag, which contain auxiliary training maps.""")
+
 tf.app.flags.DEFINE_boolean('use_weighted_dice',False,
     """Use weighted dice""")
 tf.app.flags.DEFINE_float('weighted_dice_kD',1.0,
@@ -208,21 +211,34 @@ def train():
         resource.setrlimit(resource.RLIMIT_CORE,(524288,-1))
     latest_filename += "_latest"
     
+    image_filenames_list = FLAGS.image_filenames.split(',')
+    auxiliary_indices_list = [int(i) for i in FLAGS.auxiliary_maps.split(',')]
+    image_indices_list = []
+    for i in range(len(image_filenames_list)):
+      if i not in auxiliary_indices_list:
+        image_indices_list.append(i)
+    assert len(image_indices_list)==FLAGS.num_channels
+
+
     with tf.Graph().as_default():
         global_step = tf.train.get_or_create_global_step()
 
         # patch_shape(batch_size, height, width, depth, channels)
         input_batch_shape = (FLAGS.batch_size, FLAGS.patch_size, FLAGS.patch_size, FLAGS.patch_layer, FLAGS.num_channels) 
+        aux_batch_shape = (FLAGS.batch_size, FLAGS.patch_size, FLAGS.patch_size, FLAGS.patch_layer, len(auxiliary_indices_list)) 
         output_batch_shape = (FLAGS.batch_size, FLAGS.patch_size, FLAGS.patch_size, FLAGS.patch_layer, 1) # 1 for binary classification
 
-        images_placeholder, labels_placeholder = placeholder_inputs(input_batch_shape,output_batch_shape)
+        #images_placeholder, labels_placeholder = placeholder_inputs(input_batch_shape,output_batch_shape)
+        images_placeholder = tf.placeholder(tf.float32, shape=input_batch_shape, name="images_placeholder")
+        aux_placeholder    = tf.placeholder(tf.float32, shape=aux_batch_shape, name="aux_placeholder")
+        labels_placeholder = tf.placeholder(tf.int32, shape=output_batch_shape, name="labels_placeholder")   
 
-        weighted_label = labels_placeholder
-        binary_label = tf.cast(tf.greater(labels_placeholder, 0.0), dtype=tf.int32)
+        #weighted_label = labels_placeholder
+        #binary_label = tf.cast(tf.greater(labels_placeholder, 0.0), dtype=tf.int32)
 
         for batch in range(FLAGS.batch_size):
             images_log = tf.cast(images_placeholder[batch:batch+1,:,:,:,0], dtype=tf.uint8)
-            labels_log = tf.cast(tf.scalar_mul(255,binary_label[batch:batch+1,:,:,:,0]), dtype=tf.uint8)
+            labels_log = tf.cast(tf.scalar_mul(255,labels_placeholder[batch:batch+1,:,:,:,0]), dtype=tf.uint8)
 
             # needs attention for 4D support
             # DGH: disable images
@@ -394,7 +410,7 @@ def train():
         
         # Op for calculating loss
         with tf.name_scope("cross_entropy"):
-            onehot_labels = tf.one_hot(tf.squeeze(binary_label,squeeze_dims=[4]),depth = 2)
+            onehot_labels = tf.one_hot(tf.squeeze(labels_placeholder,squeeze_dims=[4]),depth = 2)
             ce_op = tf.reduce_mean(tf.nn.weighted_cross_entropy_with_logits(onehot_labels,logits,1.))
             ce_sum  = tf.get_variable("ce_sum" , dtype=tf.float32, trainable=False, initializer=tf.constant(0.))
             ce2_sum = tf.get_variable("ce2_sum", dtype=tf.float32, trainable=False, initializer=tf.constant(0.))
@@ -405,7 +421,6 @@ def train():
         #with tf.name_scope("weighted_cross_entropy"):
             true_weight=FLAGS.wce_weight
             
-            #onehot_labels = tf.one_hot(tf.squeeze(binary_label,squeeze_dims=[4]),depth = 2)
             wce_op = tf.reduce_mean(tf.nn.weighted_cross_entropy_with_logits(onehot_labels,logits,true_weight))
                 
             wce_sum  = tf.get_variable("wce_sum" , dtype=tf.float32, trainable=False, initializer=tf.constant(0.))
@@ -422,7 +437,7 @@ def train():
             # This eliminates class imbalance but could cause numerical instability with extremely large crop volumes
 
             total_volume = tf.constant(FLAGS.patch_size*FLAGS.patch_size*FLAGS.patch_layer, tf.float32)
-            label_volume = tf.cast(tf.reduce_sum(binary_label),dtype=tf.float32);
+            label_volume = tf.cast(tf.reduce_sum(labels_placeholder),dtype=tf.float32);
             dwce_true_weight = tf.cond(label_volume>0, lambda: tf.divide(tf.divide(total_volume,label_volume), tf.constant(FLAGS.drop_ratio,tf.float32)), lambda: tf.constant(1.0, dtype=tf.float32))
             dynamic_class_weights = tf.stack([tf.constant(1.0, dtype=tf.float32), dwce_true_weight],0)
             
@@ -431,7 +446,7 @@ def train():
             # compute your (unweighted) softmax cross entropy loss
             unweighted_loss = tf.nn.sparse_softmax_cross_entropy_with_logits(
                 logits=logits,
-                labels=tf.squeeze(binary_label, 
+                labels=tf.squeeze(labels_placeholder, 
                 squeeze_dims=[4]))
             # apply the weights, relying on broadcasting of the multiplication
             weighted_loss = unweighted_loss * weights
@@ -457,7 +472,7 @@ def train():
 
         # Accuracy of model
         with tf.name_scope("accuracy"):
-            correct_pred = tf.equal(tf.expand_dims(pred,-1), tf.cast(binary_label,dtype=tf.int64))
+            correct_pred = tf.equal(tf.expand_dims(pred,-1), tf.cast(labels_placeholder,dtype=tf.int64))
             accuracy = tf.reduce_mean(tf.cast(correct_pred, tf.float32))
         #tf.summary.scalar('accuracy', accuracy)
 
@@ -467,18 +482,18 @@ def train():
             # Define operations to compute Dice quantities
             
             # Computing the dice using only the second row of the 2-entry softmax vector seems more useful
-            specific_dice_op     = dice_coe(softmax_op[:,:,:,:,1],tf.cast(binary_label[:,:,:,:,0],dtype=tf.float32), loss_type='dice', axis=[1,2,3])
-            specific_jaccard_op  = dice_coe(softmax_op[:,:,:,:,1],tf.cast(binary_label[:,:,:,:,0],dtype=tf.float32), loss_type='jaccard', axis=[1,2,3])
+            specific_dice_op     = dice_coe(softmax_op[:,:,:,:,1],tf.cast(labels_placeholder[:,:,:,:,0],dtype=tf.float32), loss_type='dice', axis=[1,2,3])
+            specific_jaccard_op  = dice_coe(softmax_op[:,:,:,:,1],tf.cast(labels_placeholder[:,:,:,:,0],dtype=tf.float32), loss_type='jaccard', axis=[1,2,3])
             
-            soft_dice_numerator_op      = dice_coe(softmax_op[:,:,:,:,1], tf.cast(binary_label[:,:,:,:,0],dtype=tf.float32), loss_type='dice',axis=[1,2,3],compute='numerator')
-            soft_dice_denominator_op    = dice_coe(softmax_op[:,:,:,:,1], tf.cast(binary_label[:,:,:,:,0],dtype=tf.float32), loss_type='dice',axis=[1,2,3],compute='denominator')
-            soft_jaccard_numerator_op   = dice_coe(softmax_op[:,:,:,:,1], tf.cast(binary_label[:,:,:,:,0],dtype=tf.float32), loss_type='jaccard',axis=[1,2,3],compute='numerator')
-            soft_jaccard_denominator_op = dice_coe(softmax_op[:,:,:,:,1], tf.cast(binary_label[:,:,:,:,0],dtype=tf.float32), loss_type='jaccard',axis=[1,2,3],compute='denominator')
+            soft_dice_numerator_op      = dice_coe(softmax_op[:,:,:,:,1], tf.cast(labels_placeholder[:,:,:,:,0],dtype=tf.float32), loss_type='dice',axis=[1,2,3],compute='numerator')
+            soft_dice_denominator_op    = dice_coe(softmax_op[:,:,:,:,1], tf.cast(labels_placeholder[:,:,:,:,0],dtype=tf.float32), loss_type='dice',axis=[1,2,3],compute='denominator')
+            soft_jaccard_numerator_op   = dice_coe(softmax_op[:,:,:,:,1], tf.cast(labels_placeholder[:,:,:,:,0],dtype=tf.float32), loss_type='jaccard',axis=[1,2,3],compute='numerator')
+            soft_jaccard_denominator_op = dice_coe(softmax_op[:,:,:,:,1], tf.cast(labels_placeholder[:,:,:,:,0],dtype=tf.float32), loss_type='jaccard',axis=[1,2,3],compute='denominator')
             
-            hard_dice_numerator_op      = dice_coe(tf.round(softmax_op[:,:,:,:,1]), tf.cast(binary_label[:,:,:,:,0],dtype=tf.float32), loss_type='dice',axis=[1,2,3],compute='numerator')
-            hard_dice_denominator_op    = dice_coe(tf.round(softmax_op[:,:,:,:,1]), tf.cast(binary_label[:,:,:,:,0],dtype=tf.float32), loss_type='dice',axis=[1,2,3],compute='denominator')
-            hard_jaccard_numerator_op   = dice_coe(tf.round(softmax_op[:,:,:,:,1]), tf.cast(binary_label[:,:,:,:,0],dtype=tf.float32), loss_type='jaccard',axis=[1,2,3],compute='numerator')
-            hard_jaccard_denominator_op = dice_coe(tf.round(softmax_op[:,:,:,:,1]), tf.cast(binary_label[:,:,:,:,0],dtype=tf.float32), loss_type='jaccard',axis=[1,2,3],compute='denominator')
+            hard_dice_numerator_op      = dice_coe(tf.round(softmax_op[:,:,:,:,1]), tf.cast(labels_placeholder[:,:,:,:,0],dtype=tf.float32), loss_type='dice',axis=[1,2,3],compute='numerator')
+            hard_dice_denominator_op    = dice_coe(tf.round(softmax_op[:,:,:,:,1]), tf.cast(labels_placeholder[:,:,:,:,0],dtype=tf.float32), loss_type='dice',axis=[1,2,3],compute='denominator')
+            hard_jaccard_numerator_op   = dice_coe(tf.round(softmax_op[:,:,:,:,1]), tf.cast(labels_placeholder[:,:,:,:,0],dtype=tf.float32), loss_type='jaccard',axis=[1,2,3],compute='numerator')
+            hard_jaccard_denominator_op = dice_coe(tf.round(softmax_op[:,:,:,:,1]), tf.cast(labels_placeholder[:,:,:,:,0],dtype=tf.float32), loss_type='jaccard',axis=[1,2,3],compute='denominator')
             
             # Define variables for accumulating Dice quantities and their gradients
             soft_dice_numerator_sum    = tf.get_variable("soft_dice_numerator_sum"   , dtype=tf.float32, trainable=False, initializer=tf.constant(0.))
@@ -610,24 +625,27 @@ def train():
               
               #specific_dice_weight = tf.cond(label_volume>0, lambda: tf.divide(total_volume,label_volume), lambda: tf.constant(1.0, dtype=tf.float32))
               
-              #Tensor containing the weighted values of the nonzero label voxels
-              nonzero_label_voxels = tf.boolean_mask(weighted_label, binary_label)
-              # Give empty crops a weight of 1
-              specific_dice_weight = tf.cond(tf.size(nonzero_label_voxels)>0, lambda: tf.reduce_mean(nonzero_label_voxels), lambda: tf.constant(1.0, dtype=tf.float32))
+              ##Tensor containing the weighted values of the nonzero label voxels
+              #nonzero_label_voxels = tf.boolean_mask(weighted_label, binary_label)
+              ## Give empty crops a weight of 1
+              #specific_dice_weight = tf.cond(tf.size(nonzero_label_voxels)>0, lambda: tf.reduce_mean(nonzero_label_voxels), lambda: tf.constant(1.0, dtype=tf.float32))
 
-              if FLAGS.use_weighted_dice is True:
-                accum_op = [specific_dice_gsum[j].assign_add(g_i[j][0] * specific_dice_weight) for j in range(len(g_i))]
-              else:
-                accum_op = [specific_dice_gsum[j].assign_add(g_i[j][0]) for j in range(len(g_i))]
+              #if FLAGS.use_weighted_dice is True:
+              #  accum_op = [specific_dice_gsum[j].assign_add(g_i[j][0] * specific_dice_weight) for j in range(len(g_i))]
+              #else:
+              #  accum_op = [specific_dice_gsum[j].assign_add(g_i[j][0]) for j in range(len(g_i))]
+              accum_op = [specific_dice_gsum[j].assign_add(g_i[j][0]) for j in range(len(g_i))]
               zero_op += [specific_dice_gsum_j.assign(tf.zeros_like(specific_dice_gsum_j)) for specific_dice_gsum_j in specific_dice_gsum]
 
               compute_gradient_op = []
-              if FLAGS.use_weighted_dice is True:
-                for j in range(len(t_vars)):
-                  compute_gradient_op += [accum_tvars[j].assign(specific_dice_gsum[j]) / sum_weights]
-              else:
-                for j in range(len(t_vars)):
-                  compute_gradient_op += [accum_tvars[j].assign(specific_dice_gsum[j]) / n_ab]
+              #if FLAGS.use_weighted_dice is True:
+              #  for j in range(len(t_vars)):
+              #    compute_gradient_op += [accum_tvars[j].assign(specific_dice_gsum[j]) / sum_weights]
+              #else:
+              #  for j in range(len(t_vars)):
+              #    compute_gradient_op += [accum_tvars[j].assign(specific_dice_gsum[j]) / n_ab]
+              for j in range(len(t_vars)):
+                compute_gradient_op += [accum_tvars[j].assign(specific_dice_gsum[j]) / n_ab]
               
             elif FLAGS.loss_function == 'dice':
               specific_dice_weight = tf.constant(1.0,dtype=tf.float32)
@@ -801,11 +819,13 @@ def train():
                   sess.run(sum_zero_op) # reset loss-averaging
 
                   for i in range(n_accum_crops):
-                    [image, label] = sess.run(next_element_train)
-                    image = image[:,:,:,:,:] #image[:,:,:,:,np.newaxis]
+                    [inputs, label] = sess.run(next_element_train)
+                    #image = image[:,:,:,:,:] 
+                    image = inputs[:,:,:,:,image_indices_list] 
+                    aux = inputs[:,:,:,:,auxiliary_indices_list]
                     label = label[:,:,:,:,np.newaxis]
-                    train, train_loss, sum_accum = sess.run([accum_op, loss_fn, sum_accum_op], feed_dict={images_placeholder: image, labels_placeholder: label})
-                    #[image, label] = sess.run(next_element_train)
+                    feed_dict = {images_placeholder: image, labels_placeholder: label, aux_placeholder: aux}
+                    train, train_loss, sum_accum = sess.run([accum_op, loss_fn, sum_accum_op], feed_dict=feed_dict)
                   n_train = int(sess.run(n_ab))
 
                   logger.debug("Applying gradients after total %d accumulations"%n_train)
@@ -882,13 +902,14 @@ def train():
               #  try:
               model.is_training = False;
               for i in range(n_accum_crops):
-                  [image, label] = sess.run(next_element_test)
-
-                  image = image[:,:,:,:,:] #image[:,:,:,:,np.newaxis]
+                  [inputs, label] = sess.run(next_element_test)
+                  #image = image[:,:,:,:,:] 
+                  image = inputs[:,:,:,:,image_indices_list] 
+                  aux = inputs[:,:,:,:,auxiliary_indices_list]
                   label = label[:,:,:,:,np.newaxis]
-                  
+                  feed_dict = {images_placeholder: image, labels_placeholder: label, aux_placeholder: aux}
                   #model.is_training = False;
-                  test_loss, sum_accum = sess.run([loss_fn, sum_accum_op], feed_dict={images_placeholder: image, labels_placeholder: label})
+                  test_loss, sum_accum = sess.run([loss_fn, sum_accum_op], feed_dict=feed_dict)
                   # This is redundant, fix
                   #test_loss_avg += test_loss
                   #n_test += 1
