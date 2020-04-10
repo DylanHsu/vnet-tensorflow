@@ -5,7 +5,7 @@ from glob import glob
 prefix = 'cacheAug'
 jobfolder = "./jobs/"
 cpu_cores = 4 
-cpu_ram = 4 
+cpu_ram = 16
 #case_dir = "/data/deasy/DylanHsu/N401_unstripped/nifti/"
 case_dir = "/data/deasy/DylanHsu/SRS_N401/nifti/"
 # Clear job folder

@@ -7,7 +7,7 @@ import datetime
 import shutil
 from glob import glob
 
-nAug=100
+nAug=50
 input_data_dir='/data/deasy/DylanHsu/SRS_N401/nifti'
 output_data_dir='/data/deasy/DylanHsu/SRS_N401/augcache'
 image_filenames=('mr1.nii.gz', 'ct.nii.gz')
@@ -17,7 +17,8 @@ case = sys.argv[1]
 
 augTransforms = [
   NiftiDataset.RandomHistoMatch(0, input_data_dir, image_filenames[0], 1.0),
-  NiftiDataset.StatisticalNormalization(0, 5.0, 5.0, nonzero_only=True, zero_floor=True),
+  NiftiDataset.StatisticalNormalization(0, 5.0, 5.0, nonzero_only=True, zero_floor=True), # MR [0,999999] -> [0,255]
+  NiftiDataset.ManualNormalization(1, 0, 100.), # CT [0,100] H.U. -> [0,255] Arbitrary units
   NiftiDataset.BSplineDeformation(),
   NiftiDataset.RandomRotation(maxRot = 20*0.01745),  # 20 degrees
   NiftiDataset.ThresholdCrop(),
@@ -41,6 +42,7 @@ label = augDataset.read_image(label_path)
 writer = sitk.ImageFileWriter()
 writer.UseCompressionOn()
 statFilter = sitk.StatisticsImageFilter()
+distanceMapFilter = sitk.SignedDanielssonDistanceMapImageFilter()
 for iAug in range(1, nAug+1):
   slug = "{0:s}_aug{1:03d}".format(case,iAug)
   
@@ -59,15 +61,16 @@ for iAug in range(1, nAug+1):
   if os.path.isdir(output_case_dir):
     shutil.rmtree(output_case_dir)
   os.mkdir(output_case_dir)
-  writer.SetFileName(os.path.join(output_case_dir, image_filenames[0]))
-  writer.Execute(sample_tfm['image'][0])
-  writer.SetFileName(os.path.join(output_case_dir, image_filenames[1]))
-  writer.Execute(sample_tfm['image'][1])
+  for iImage in range(len(image_filenames)):
+    writer.SetFileName(os.path.join(output_case_dir, image_filenames[iImage]))
+    writer.Execute(sample_tfm['image'][iImage])
   writer.SetFileName(os.path.join(output_case_dir, label_filename))
   writer.Execute(sample_tfm['label'])
 
-  
-
-
+  # Recalculate distance map from the transformed label,
+  # since it needs to be defined everywhere
+  distanceMap = distanceMapFilter.Execute( sample_tfm['label'], False, False, False)
+  writer.SetFileName( os.path.join(output_case_dir, "distance_map.nii.gz") )
+  writer.Execute(distanceMap)
 
 
