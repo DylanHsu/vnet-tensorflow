@@ -155,7 +155,10 @@ def train():
     latest_filename += "_latest"
     
     image_filenames_list = FLAGS.image_filenames.split(',')
-    auxiliary_indices_list = [int(i) for i in FLAGS.auxiliary_maps.split(',')]
+    if FLAGS.auxiliary_maps == '':
+      auxiliary_indices_list = []
+    else:
+      auxiliary_indices_list = [int(i) for i in FLAGS.auxiliary_maps.split(',')]
     image_indices_list = []
     for i in range(len(image_filenames_list)):
       if i not in auxiliary_indices_list:
