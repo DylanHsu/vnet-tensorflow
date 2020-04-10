@@ -119,6 +119,11 @@ tf.app.flags.DEFINE_float('weighted_dice_kI',5.0,
 # tf.app.flags.DEFINE_float('class_weight',0.15,
 #     """The weight used for imbalanced classes data. Currently only apply on binary segmentation class (weight for 0th class, (1-weight) for 1st class)""")
 
+tf.app.flags.DEFINE_float('tversky_alpha',0.5,
+    """Relative weight for False Negatives in the Tversky Index paradigm""")
+tf.app.flags.DEFINE_float('tversky_beta',0.5,
+    """Relative weight for False Positives in the Tversky Index paradigm""")
+
 def placeholder_inputs(input_batch_shape, output_batch_shape):
     """Generate placeholder variables to represent the the input tensors.
     These placeholders are used as inputs by the rest of the model building
@@ -197,7 +202,7 @@ def train():
                 #NiftiDataset.RandomHistoMatch(train_data_dir, FLAGS.image_filename, 1.0),
                 #NiftiDataset.StatisticalNormalization(0, 5.0, 5.0, nonzero_only=True),
                 #NiftiDataset.BSplineDeformation(),
-                NiftiDataset.ManualNormalization(1, 0, 100.),
+                #NiftiDataset.ManualNormalization(1, 0, 100.),
                 NiftiDataset.RandomCrop((FLAGS.patch_size, FLAGS.patch_size, FLAGS.patch_layer),FLAGS.drop_ratio,FLAGS.min_pixel),
                 NiftiDataset.RandomNoise(0,0.1),
                 NiftiDataset.RandomFlip(0.5, [True,True,True]),
@@ -420,8 +425,8 @@ def train():
             # Define operations to compute Dice quantities
             
             # Computing the dice using only the second row of the 2-entry softmax vector seems more useful
-            specific_dice_op     = dice_coe(softmax_op[:,:,:,:,1],tf.cast(labels_placeholder[:,:,:,:,0],dtype=tf.float32), loss_type='dice', axis=[1,2,3])
-            specific_jaccard_op  = dice_coe(softmax_op[:,:,:,:,1],tf.cast(labels_placeholder[:,:,:,:,0],dtype=tf.float32), loss_type='jaccard', axis=[1,2,3])
+            specific_dice_op     = dice_coe(softmax_op[:,:,:,:,1],tf.cast(labels_placeholder[:,:,:,:,0],dtype=tf.float32), loss_type='dice', axis=[1,2,3], alpha=FLAGS.tversky_alpha, beta=FLAGS.tversky_beta)
+            specific_jaccard_op  = dice_coe(softmax_op[:,:,:,:,1],tf.cast(labels_placeholder[:,:,:,:,0],dtype=tf.float32), loss_type='jaccard', axis=[1,2,3], alpha=FLAGS.tversky_alpha, beta=FLAGS.tversky_beta)
             
             soft_dice_numerator_op      = dice_coe(softmax_op[:,:,:,:,1], tf.cast(labels_placeholder[:,:,:,:,0],dtype=tf.float32), loss_type='dice',axis=[1,2,3],compute='numerator')
             soft_dice_denominator_op    = dice_coe(softmax_op[:,:,:,:,1], tf.cast(labels_placeholder[:,:,:,:,0],dtype=tf.float32), loss_type='dice',axis=[1,2,3],compute='denominator')
