@@ -85,6 +85,12 @@ tf.app.flags.DEFINE_integer('shuffle_buffer_size',50,
     """Number of elements used in shuffle buffer""")
 tf.app.flags.DEFINE_string('loss_function','dice',
     """Loss function used in optimization (ce, wce, dwce, dice, jaccard)""")
+
+tf.app.flags.DEFINE_float('boundary_loss_weight',0.0,
+    """Coefficient for boundary loss term""")
+tf.app.flags.DEFINE_integer('distance_map_index',-1,
+    """Index of the distance map image in the images_filenames list (-1=no map)""")
+
 tf.app.flags.DEFINE_string('optimizer','sgd',
     """Optimization method (sgd, adam, momentum, nesterov_momentum)""")
 tf.app.flags.DEFINE_float('momentum',0.5,
@@ -107,15 +113,9 @@ tf.app.flags.DEFINE_float('dropout_keepprob',1.0,
 tf.app.flags.DEFINE_float('l2_weight',0.0,
     """Weight for L2 regularization (should be order of 0.0001)""")
 
-tf.app.flags.DEFINE_string('auxiliary_maps','',
-    """Indices of the images from images_filenames flag, which contain auxiliary training maps.""")
+#tf.app.flags.DEFINE_string('auxiliary_maps','',
+#    """Indices of the images from images_filenames flag, which contain auxiliary training maps.""")
 
-tf.app.flags.DEFINE_boolean('use_weighted_dice',False,
-    """Use weighted dice""")
-tf.app.flags.DEFINE_float('weighted_dice_kD',1.0,
-    """Weight for the Diameter term in the Weighted-Dice paradigm.""")
-tf.app.flags.DEFINE_float('weighted_dice_kI',5.0,
-    """Weight for the Intensity term in the Weighted-Dice paradigm.""")
 # tf.app.flags.DEFINE_float('class_weight',0.15,
 #     """The weight used for imbalanced classes data. Currently only apply on binary segmentation class (weight for 0th class, (1-weight) for 1st class)""")
 
@@ -155,10 +155,12 @@ def train():
     latest_filename += "_latest"
     
     image_filenames_list = FLAGS.image_filenames.split(',')
-    if FLAGS.auxiliary_maps == '':
-      auxiliary_indices_list = []
-    else:
-      auxiliary_indices_list = [int(i) for i in FLAGS.auxiliary_maps.split(',')]
+    auxiliary_indices_list = []
+    distance_map_aux_channel = -1 # Which channel of aux_placeholder the distance map ends up at
+    if FLAGS.distance_map_index>=0:
+      assert FLAGS.distance_map_index < len(image_filenames_list)
+      distance_map_aux_channel = len(auxiliary_indices_list)
+      auxiliary_indices_list.append(FLAGS.distance_map_index)
     image_indices_list = []
     for i in range(len(image_filenames_list)):
       if i not in auxiliary_indices_list:
@@ -219,8 +221,6 @@ def train():
                 # NiftiDataset.Normalization(),
                 #NiftiDataset.Resample((0.45,0.45,0.45)),
                 ]
-            if FLAGS.use_weighted_dice is True:
-                trainTransforms = [NiftiDataset.DifficultyIndex((FLAGS.patch_size, FLAGS.patch_size, FLAGS.patch_layer), FLAGS.weighted_dice_kD, FLAGS.weighted_dice_kI)] + trainTransforms
             
             testTransforms = [
                 NiftiDataset.StatisticalNormalization(0, 5.0, 5.0, nonzero_only=True, zero_floor=True),
@@ -424,6 +424,15 @@ def train():
 
         
         # Dice Similarity, currently only for binary segmentation
+        with tf.name_scope("distance"):
+            # turn off calculation later
+            #if FLAGS.boundary_loss_weight != 0 :
+            if FLAGS.distance_map_index >= 0:
+              boundary_loss_op = tf.reduce_sum(tf.multiply(softmax_op[:,:,:,:,1], aux_placeholder[:,:,:,:,distance_map_aux_channel]))
+              #print("shapes",softmax_op[:,:,:,:,1].get_shape(), aux_placeholder[:,:,:,:,distance_map_aux_channel].get_shape(), boundary_loss_op.get_shape())
+              boundary_loss_sum  = tf.get_variable("boundary_loss_sum" , dtype=tf.float32, trainable=False, initializer=tf.constant(0.))
+              boundary_loss_batch = tf.cond(n_ab > 0., lambda: boundary_loss_sum/n_ab, lambda: tf.constant(0.)) 
+              tf.summary.scalar('boundary_loss_batch',boundary_loss_batch)
         with tf.name_scope("dice"):
             # Define operations to compute Dice quantities
             
@@ -476,18 +485,16 @@ def train():
             soft_jaccard_batch = (soft_jaccard_numerator_sum+smooth_batch)/(soft_jaccard_denominator_sum+smooth_batch)
             hard_jaccard_batch = (hard_jaccard_numerator_sum+smooth_batch)/(hard_jaccard_denominator_sum+smooth_batch)
             
-            sum_weights = tf.get_variable("sum_weights", dtype=tf.float32, trainable=False, use_resource=True, initializer=tf.constant(0.))
-            if FLAGS.use_weighted_dice is True:
-              specific_dice_batch = tf.cond(sum_weights > 0., lambda: specific_dice_sum/sum_weights, lambda: tf.constant(0.)) 
-              specific_jaccard_batch = tf.cond(sum_weights > 0., lambda: specific_jaccard_sum/sum_weights, lambda: tf.constant(0.)) 
-            else: 
-              specific_dice_batch = tf.cond(n_ab > 0., lambda: specific_dice_sum/n_ab, lambda: tf.constant(0.)) 
-              specific_jaccard_batch = tf.cond(n_ab > 0., lambda: specific_jaccard_sum/n_ab, lambda: tf.constant(0.)) 
+            specific_dice_batch = tf.cond(n_ab > 0., lambda: specific_dice_sum/n_ab, lambda: tf.constant(0.)) 
+            specific_jaccard_batch = tf.cond(n_ab > 0., lambda: specific_jaccard_sum/n_ab, lambda: tf.constant(0.)) 
 
             dice_loss_op    = 1. - soft_dice_batch
             jaccard_loss_op = 1. - soft_jaccard_batch
             specific_dice_loss_op = 1. - specific_dice_batch
             specific_jaccard_loss_op = 1. - specific_jaccard_batch
+            
+            if FLAGS.distance_map_index >= 0 and FLAGS.boundary_loss_weight != 0 :
+              specific_dice_loss_op += boundary_loss_batch
 
             # Register these quantities in the Tensorboard output
             tf.summary.scalar('soft_dice_loss', dice_loss_op)
@@ -564,37 +571,25 @@ def train():
               accum_op = [accum_tvars[i].assign_add(batch_grad_var[0]) for i, batch_grad_var in enumerate(batch_grads_vars)]
               compute_gradient_op = []
               # Operation to apply the accumulated gradients
-              specific_dice_weight = tf.constant(1.0,dtype=tf.float32)
             elif FLAGS.loss_function == 'specific_dice':
               # g_i: the gradient of the Dice metric for the i'th sample
-              g_i = optimizer.compute_gradients(1. - specific_dice_op)
-              
-              #specific_dice_weight = tf.cond(label_volume>0, lambda: tf.divide(total_volume,label_volume), lambda: tf.constant(1.0, dtype=tf.float32))
+              specific_loss = (1. - specific_dice_op)
+              if FLAGS.distance_map_index >= 0 and FLAGS.boundary_loss_weight!=0:
+                specific_loss += tf.constant(FLAGS.boundary_loss_weight, dtype=tf.float32) * boundary_loss_op
+              g_i = optimizer.compute_gradients(specific_loss)
               
               ##Tensor containing the weighted values of the nonzero label voxels
               #nonzero_label_voxels = tf.boolean_mask(weighted_label, binary_label)
               ## Give empty crops a weight of 1
-              #specific_dice_weight = tf.cond(tf.size(nonzero_label_voxels)>0, lambda: tf.reduce_mean(nonzero_label_voxels), lambda: tf.constant(1.0, dtype=tf.float32))
 
-              #if FLAGS.use_weighted_dice is True:
-              #  accum_op = [specific_dice_gsum[j].assign_add(g_i[j][0] * specific_dice_weight) for j in range(len(g_i))]
-              #else:
-              #  accum_op = [specific_dice_gsum[j].assign_add(g_i[j][0]) for j in range(len(g_i))]
               accum_op = [specific_dice_gsum[j].assign_add(g_i[j][0]) for j in range(len(g_i))]
               zero_op += [specific_dice_gsum_j.assign(tf.zeros_like(specific_dice_gsum_j)) for specific_dice_gsum_j in specific_dice_gsum]
 
               compute_gradient_op = []
-              #if FLAGS.use_weighted_dice is True:
-              #  for j in range(len(t_vars)):
-              #    compute_gradient_op += [accum_tvars[j].assign(specific_dice_gsum[j]) / sum_weights]
-              #else:
-              #  for j in range(len(t_vars)):
-              #    compute_gradient_op += [accum_tvars[j].assign(specific_dice_gsum[j]) / n_ab]
               for j in range(len(t_vars)):
                 compute_gradient_op += [accum_tvars[j].assign(specific_dice_gsum[j]) / n_ab]
               
             elif FLAGS.loss_function == 'dice':
-              specific_dice_weight = tf.constant(1.0,dtype=tf.float32)
               # The Dice and Jaccard scores are evaluated across the voxels of all the samples in the batch.
               # To get the gradient of that thing, we need to sum the gradient of the numerator and denominator 
               # of the Dice (Jaccard) score over the batch samples.
@@ -613,7 +608,6 @@ def train():
                 compute_gradient_op += [accum_tvars[j].assign( ((soft_dice_numerator_sum+smooth_batch) * soft_denominator_gsum[j] - (soft_dice_denominator_sum+smooth_batch) * soft_numerator_gsum[j]) / ((soft_dice_denominator_sum+smooth_batch)*(soft_dice_denominator_sum+smooth_batch))) ]
 
             elif FLAGS.loss_function == 'jaccard':
-              specific_dice_weight = tf.constant(1.0,dtype=tf.float32)
               num_g_i   = optimizer.compute_gradients(soft_jaccard_numerator_op, t_vars)
               den_g_i = optimizer.compute_gradients(soft_jaccard_denominator_op, t_vars)
               # Operation to accumulate the numerator and denominators and their gradients
@@ -635,7 +629,6 @@ def train():
         with tf.name_scope("avgloss"):
             # Here we accumulate the average loss and square of loss across the accum. batches
             sum_zero_op = [n_ab.assign(tf.zeros_like(n_ab))]
-            sum_zero_op += [sum_weights.assign(tf.zeros_like(sum_weights))]
 
             sum_zero_op += [ce_sum.assign(tf.zeros_like(ce_sum))]
             sum_zero_op += [ce2_sum.assign(tf.zeros_like(ce2_sum))]
@@ -656,9 +649,9 @@ def train():
             
             sum_zero_op += [specific_dice_sum.assign(tf.zeros_like(specific_dice_sum))]
             sum_zero_op += [specific_jaccard_sum.assign(tf.zeros_like(specific_jaccard_sum))]
-
+            sum_zero_op += [boundary_loss_sum.assign(tf.zeros_like(boundary_loss_sum))]
+            
             sum_accum_op = [n_ab.assign_add(1.)]
-            sum_accum_op += [sum_weights.assign_add(specific_dice_weight)]
 
             sum_accum_op += [ce_sum.assign_add(ce_op)]
             sum_accum_op += [ce2_sum.assign_add(ce_op*wce_op)]
@@ -674,13 +667,11 @@ def train():
             sum_accum_op += [soft_dice_denominator_sum.assign_add(soft_dice_denominator_op)]
             sum_accum_op += [soft_jaccard_numerator_sum.assign_add(soft_jaccard_numerator_op)]
             sum_accum_op += [soft_jaccard_denominator_sum.assign_add(soft_jaccard_denominator_op)]
-            if FLAGS.use_weighted_dice is True:
-              sum_accum_op += [specific_dice_sum.assign_add(specific_dice_op*specific_dice_weight)]
-              sum_accum_op += [specific_jaccard_sum.assign_add(specific_jaccard_op*specific_dice_weight)]
-            else:
-              sum_accum_op += [specific_dice_sum.assign_add(specific_dice_op)]
-              sum_accum_op += [specific_jaccard_sum.assign_add(specific_jaccard_op)]
+            
+            sum_accum_op += [specific_dice_sum.assign_add(specific_dice_op)]
+            sum_accum_op += [specific_jaccard_sum.assign_add(specific_jaccard_op)]
 
+            sum_accum_op += [boundary_loss_sum.assign_add(boundary_loss_op)]
         # # epoch checkpoint manipulation
         start_epoch = tf.get_variable("start_epoch", shape=[1], initializer= tf.zeros_initializer,dtype=tf.int32)
         start_epoch_inc = start_epoch.assign(start_epoch+1)
