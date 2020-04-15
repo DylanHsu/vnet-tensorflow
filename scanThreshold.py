@@ -3,21 +3,12 @@ import datetime
 import SimpleITK as sitk
 from math import sqrt
 import numpy as np
+np.set_printoptions(threshold=sys.maxsize)
 import random
 from glob import glob
 import argparse
 
 parser = argparse.ArgumentParser(description='Scan the optimal probability thresholds for detection & segmentation')
-
-#assert len(sys.argv) >= 4, "Not enough arguments"
-#suffix    = sys.argv[1]
-#data_dir  = sys.argv[2]
-#threshold = float(sys.argv[3])
-#if len(sys.argv)>=5:
-#  seg_threshold = float(sys.argv[4])
-#else:
-#  seg_threshold = threshold
-#writeLabels=False
 
 parser.add_argument('suffix'       , type=str  , help="suffix of the written label files")
 parser.add_argument('data_dir'     , type=str  , help="location in which the training/testing folders reside")
@@ -25,20 +16,40 @@ parser.add_argument('threshold'    , type=float, help="threshold for detection")
 parser.add_argument('seg_threshold', type=float, help="threshold for segmentation")
 parser.add_argument("--write_labels", help="actually write the label Nifti files", action="store_true")
 parser.add_argument('--dilate_threshold', type=float, help="threshold for dilating with gaussian kernel",default=0.0)
-
-#
+parser.add_argument("--overlay_freesurfer", help="actually write the label Nifti files", action="store_true") # use FS' mri_convert to make aseg.nii.gz files
 args = parser.parse_args()
-#if args.write_labels:
 
-image_name = 'img.nii.gz'
+#image_name = 'img.nii.gz'
 label_name = 'label_smoothed.nii.gz'
 prob_name = 'probability_vnet'+'-'+args.suffix+'.nii.gz'
-#stats_dir='/data/deasy/DylanHsu/N200_1mm3/stats/stats'+'-'+args.suffix
-stats_dir='/data/deasy/DylanHsu/N401_unstripped/stats/stats'+'-'+args.suffix
+#prob_name = 'probability_centernet-%s.nii.gz'%args.suffix
+stats_dir='/data/deasy/DylanHsu/SRS_N401/stats/stats'+'-'+args.suffix
 try:
   os.makedirs(stats_dir)
 except FileExistsError:
   pass
+
+# setup Freesurfer data structures
+if args.overlay_freesurfer:
+  from srsPre.fsOneHotEncoding import fsDicts
+  fsLabelDict, fsNamedGroups, fsNumberedGroups = fsDicts()
+  fs_aseg_name = 'aseg.nii.gz'
+  fsGroupConfusionMatrix = {}
+  fsLabelToGroupMapping = {}
+  for group, indices in fsNumberedGroups.items():
+    fsGroupConfusionMatrix[group] = [0,0,0,0] #tp,fp,tn,fn
+  for index in fsLabelDict:
+    foundIndex=False
+    for group, indices in fsNumberedGroups.items():
+      if index in indices:
+        fsLabelToGroupMapping[index] = group
+        foundIndex=True
+    #if not foundIndex:
+    #  fsLabelToGroupMapping[index] = 'Null'
+    #  print('FS index %d "%s" mapped to Null group'%(index,fsLabelDict[index]))
+      
+        
+
 
 #for dataset in ['training','testing']:
 for dataset in ['testing']:
@@ -66,27 +77,27 @@ for dataset in ['testing']:
   globalLesionStats=[]
   for case in cases:
     print('analyzing case',case)
-    image_path = os.path.join(args.data_dir, dataset, case, 'img.nii.gz')
-    label_path = os.path.join(args.data_dir, dataset, case, 'label_smoothed.nii.gz')
+    #image_path = os.path.join(args.data_dir, dataset, case, 'img.nii.gz')
+    label_path = os.path.join(args.data_dir, dataset, case, label_name)
     prob_path  = os.path.join(args.data_dir, dataset, case, prob_name)
     
     # Instantiate filters
-    aif = sitk.AddImageFilter()
-    btif = sitk.BinaryThresholdImageFilter()
+    aif             = sitk.AddImageFilter()
+    btif            = sitk.BinaryThresholdImageFilter()
     castImageFilter = sitk.CastImageFilter()
-    ccFilter = sitk.ConnectedComponentImageFilter()
-    hdif = sitk.HausdorffDistanceImageFilter()
-    mapFilter = sitk.LabelImageToLabelMapFilter()
-    mif=sitk.LabelMapMaskImageFilter()
-    overlapFilter = sitk.LabelOverlapMeasuresImageFilter()
-    reader = sitk.ImageFileReader()
-    statFilter = sitk.StatisticsImageFilter()
-    sif=sitk.StatisticsImageFilter()
-    writer=sitk.ImageFileWriter()
-    xif = sitk.MultiplyImageFilter()
-    
-    dgif = sitk.DiscreteGaussianImageFilter()
-    dgif.SetVariance(1)
+    ccFilter        = sitk.ConnectedComponentImageFilter()
+    dgif            = sitk.DiscreteGaussianImageFilter()
+    eif             = sitk.EqualImageFilter()
+    hdif            = sitk.HausdorffDistanceImageFilter()
+    mapFilter       = sitk.LabelImageToLabelMapFilter()
+    lmmif           = sitk.LabelMapMaskImageFilter()
+    maskImageFilter = sitk.MaskImageFilter()
+    overlapFilter   = sitk.LabelOverlapMeasuresImageFilter()
+    #pasteFilter     = sitk.PasteImageFilter()
+    reader          = sitk.ImageFileReader()
+    statFilter      = sitk.StatisticsImageFilter()
+    writer          = sitk.ImageFileWriter()
+    xif             = sitk.MultiplyImageFilter()
     
     labelShapeFilter = sitk.LabelShapeStatisticsImageFilter()
     trueLabelShapeFilter = sitk.LabelShapeStatisticsImageFilter()
@@ -104,6 +115,17 @@ for dataset in ['testing']:
     reader.SetFileName(prob_path)
     softmax = reader.Execute()
     
+    if args.overlay_freesurfer:
+      aseg_path  = os.path.join(args.data_dir, dataset, case, fs_aseg_name)
+      reader.SetFileName(aseg_path)
+      aseg = reader.Execute()
+      # This is suboptimal, but I couldn't figure out the correct settings to get PasteImageFilter working
+      aseg = sitk.Resample(aseg, trueLabel.GetSize(), sitk.Transform(), sitk.sitkNearestNeighbor, trueLabel.GetOrigin(), trueLabel.GetSpacing(), trueLabel.GetDirection(), 0, aseg.GetPixelID())
+      #castImageFilter.SetOutputPixelType( aseg.GetPixelID() )
+      #pasteFilter.Execute( castImageFilter.Execute(trueLabel), aseg)
+      # This is suboptimal
+      
+
     #image_np = sitk.GetArrayFromImage(image)
     #softmax_np = np.transpose(sitk.GetArrayFromImage(softmax), (2,1,0))
     trueLabel_np = np.transpose(sitk.GetArrayFromImage(trueLabel), (2,1,0))
@@ -174,11 +196,11 @@ for dataset in ['testing']:
       seededSegLabel = xif.Execute(label, 0.0)
       for i in range(1,segLabelShapeFilter.GetNumberOfLabels()+1):
         seededSegCCs=[]
-        mif.SetLabel(i)
-        segLesion = mif.Execute(segLabelMap, segLabel)
+        lmmif.SetLabel(i)
+        segLesion = lmmif.Execute(segLabelMap, segLabel)
         for j in nonartifacts: # nonartifacts holds Detection seed indices
-          mif.SetLabel(j)
-          seedLesion = mif.Execute(labelMap, label)
+          lmmif.SetLabel(j)
+          seedLesion = lmmif.Execute(labelMap, label)
           overlapFilter.Execute(segLesion, seedLesion)
           if overlapFilter.GetDiceCoefficient() > 0.0:
             seededSegCCs.append(i)
@@ -188,6 +210,7 @@ for dataset in ['testing']:
 
       if args.dilate_threshold > 0.0:
         castImageFilter.SetOutputPixelType( sitk.sitkFloat32 )
+        dgif.SetVariance(1)
         blurredSeededSegLabel = dgif.Execute(castImageFilter.Execute(seededSegLabel))
         seededSegLabel = btif.Execute(blurredSeededSegLabel, float(args.dilate_threshold), 1e6, 1, 0)
         castImageFilter.SetOutputPixelType( sitk.sitkInt16 )
@@ -219,12 +242,12 @@ for dataset in ['testing']:
     patientLesionStats=[]
     for i in range(1,trueLabelShapeFilter.GetNumberOfLabels()+1):
       overlappingPredictions=[]
-      mif.SetLabel(i)
-      true_lesion = mif.Execute(trueLabelMap, trueLabel)
+      lmmif.SetLabel(i)
+      true_lesion = lmmif.Execute(trueLabelMap, trueLabel)
       found_pred = False
       for j in nonartifacts:
-        mif.SetLabel(j)
-        predicted_lesion = mif.Execute(seededSegLabelMap, seededSegLabel)
+        lmmif.SetLabel(j)
+        predicted_lesion = lmmif.Execute(seededSegLabelMap, seededSegLabel)
         overlapFilter.Execute(predicted_lesion, true_lesion)
         if overlapFilter.GetDiceCoefficient() > 0.0:
           overlappingPredictions.append(j)
@@ -238,11 +261,11 @@ for dataset in ['testing']:
         if len(overlappingPredictions)>0:
           totalPrediction = None
           for j in overlappingPredictions:
-            mif.SetLabel(j)
+            lmmif.SetLabel(j)
             if totalPrediction is None: 
-              totalPrediction = mif.Execute(seededSegLabelMap, seededSegLabel)
+              totalPrediction = lmmif.Execute(seededSegLabelMap, seededSegLabel)
             else:
-              totalPrediction = aif.Execute(totalPrediction, mif.Execute(seededSegLabelMap, seededSegLabel))
+              totalPrediction = aif.Execute(totalPrediction, lmmif.Execute(seededSegLabelMap, seededSegLabel))
           overlapFilter.Execute(totalPrediction, true_lesion)
           specificDice = overlapFilter.GetDiceCoefficient()
           hdif.Execute(true_lesion, totalPrediction)
@@ -289,14 +312,18 @@ for dataset in ['testing']:
     notSeededSegLabel = notOp.Execute(seededSegLabel)
   
     # Per voxel analysis
-    sif.Execute(andOp.Execute(trueLabel,seededSegLabel))
-    tpv = sif.GetSum()
-    sif.Execute(andOp.Execute(notTrueLabel,seededSegLabel))
-    fpv = sif.GetSum()
-    sif.Execute(andOp.Execute(notTrueLabel,notSeededSegLabel))
-    tnv = sif.GetSum()
-    sif.Execute(andOp.Execute(trueLabel,notSeededSegLabel))
-    fnv = sif.GetSum()
+    truePositiveMask = andOp.Execute(trueLabel,seededSegLabel)
+    statFilter.Execute(truePositiveMask)
+    tpv = statFilter.GetSum()
+    falsePositiveMask = andOp.Execute(notTrueLabel,seededSegLabel)
+    statFilter.Execute(falsePositiveMask)
+    fpv = statFilter.GetSum()
+    trueNegativeMask = andOp.Execute(notTrueLabel,notSeededSegLabel)
+    statFilter.Execute(trueNegativeMask)
+    tnv = statFilter.GetSum()
+    falseNegativeMask = andOp.Execute(trueLabel,notSeededSegLabel)
+    statFilter.Execute(falseNegativeMask)
+    fnv = statFilter.GetSum()
   
     patient_sensitivity = tpv/(tpv+fnv)
     patient_specificity = tnv/(tnv+fpv)
@@ -321,6 +348,22 @@ for dataset in ['testing']:
       f_dice = open(dicePath,'w')
       f_dice.write("%s %.3f %d %d\n"%(case, patient_dice, len(falsePositivesList), len(falseNegativesList)))
       f_dice.close()
+    if args.overlay_freesurfer:
+      # apply the True Positive, etc. masks to the Freesurfer label image and
+      # update the Freesurfer groups' confusion matrix accordingly
+      confusionMasks = [truePositiveMask,falsePositiveMask,trueNegativeMask,falseNegativeMask]
+      for c in range(len(confusionMasks)):
+        maskedAseg = maskImageFilter.Execute(aseg, confusionMasks[c])
+        #for fsLabel in fsLabelDict:
+        for fsLabel in fsLabelToGroupMapping:
+          # Check how many voxels in this masked image are equal to integer label fsLabel
+          statFilter.Execute(eif.Execute( maskedAseg, fsLabel))
+          labelVoxels = statFilter.GetSum()
+          # Increment the accounting
+          group = fsLabelToGroupMapping[fsLabel]
+          fsGroupConfusionMatrix[group][c] += labelVoxels
+          #print('adding %d to group=%s,c=%d'%(labelVoxels,group,c))
+    #print(fsGroupConfusionMatrix['CerebralWM'])
 
   ncasesf=float(ncases)  
   avgPatientDice /= ncasesf
@@ -383,5 +426,15 @@ for dataset in ['testing']:
   statsTuple = (args.threshold,args.seg_threshold, avgPatientDice,avgPatientDiceError,detEff,detEffError,avgLesionDice,avgLesionDiceError,avgLesionHausdorff,avgLesionHausdorffError,patientFpm,patientFpmError,patientFnm,patientFnmError,patientTpm,patientTpmError,avgPatientSensitivity,avgPatientSpecificity,tpvTotal,fpvTotal,tnvTotal,fnvTotal)
   f_stats.write("%.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f %.6f %.6f %d %d %d %d\n"%(statsTuple))
   f_stats.close()
+
+  if args.overlay_freesurfer:
+    filename = 'freesurfer_%s-seed%.3f-seg%.3f-%s'%(dataset,args.threshold,args.seg_threshold,args.suffix)
+    filename = filename.replace(".","p")
+    filename += ".txt"
+    f_freesurfer = open(os.path.join(stats_dir, filename),'w')
+    for group in fsGroupConfusionMatrix:
+      matrix=fsGroupConfusionMatrix[group] 
+      f_freesurfer.write("%s %d %d %d %d %d\n"%(group,matrix[0],matrix[1],matrix[2],matrix[3],matrix[0]+matrix[1]+matrix[2]+matrix[3]))
+    f_freesurfer.close()
 
 
