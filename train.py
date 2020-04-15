@@ -113,9 +113,6 @@ tf.app.flags.DEFINE_float('dropout_keepprob',1.0,
 tf.app.flags.DEFINE_float('l2_weight',0.0,
     """Weight for L2 regularization (should be order of 0.0001)""")
 
-#tf.app.flags.DEFINE_string('auxiliary_maps','',
-#    """Indices of the images from images_filenames flag, which contain auxiliary training maps.""")
-
 # tf.app.flags.DEFINE_float('class_weight',0.15,
 #     """The weight used for imbalanced classes data. Currently only apply on binary segmentation class (weight for 0th class, (1-weight) for 1st class)""")
 
@@ -426,11 +423,11 @@ def train():
         # Dice Similarity, currently only for binary segmentation
         with tf.name_scope("distance"):
             # turn off calculation later
-            #if FLAGS.boundary_loss_weight != 0 :
             if FLAGS.distance_map_index >= 0:
+              scalar_boundary_loss_weight = tf.constant(FLAGS.boundary_loss_weight, dtype=tf.float32)
+              boundary_loss_sum  = tf.get_variable("boundary_loss_sum" , dtype=tf.float32, trainable=False, initializer=tf.constant(0.))
               boundary_loss_op = tf.reduce_sum(tf.multiply(softmax_op[:,:,:,:,1], aux_placeholder[:,:,:,:,distance_map_aux_channel]))
               #print("shapes",softmax_op[:,:,:,:,1].get_shape(), aux_placeholder[:,:,:,:,distance_map_aux_channel].get_shape(), boundary_loss_op.get_shape())
-              boundary_loss_sum  = tf.get_variable("boundary_loss_sum" , dtype=tf.float32, trainable=False, initializer=tf.constant(0.))
               boundary_loss_batch = tf.cond(n_ab > 0., lambda: boundary_loss_sum/n_ab, lambda: tf.constant(0.)) 
               tf.summary.scalar('boundary_loss_batch',boundary_loss_batch)
         with tf.name_scope("dice"):
@@ -494,7 +491,7 @@ def train():
             specific_jaccard_loss_op = 1. - specific_jaccard_batch
             
             if FLAGS.distance_map_index >= 0 and FLAGS.boundary_loss_weight != 0 :
-              specific_dice_loss_op += boundary_loss_batch
+              specific_dice_loss_op += boundary_loss_batch * scalar_boundary_loss_weight
 
             # Register these quantities in the Tensorboard output
             tf.summary.scalar('soft_dice_loss', dice_loss_op)
@@ -575,7 +572,7 @@ def train():
               # g_i: the gradient of the Dice metric for the i'th sample
               specific_loss = (1. - specific_dice_op)
               if FLAGS.distance_map_index >= 0 and FLAGS.boundary_loss_weight!=0:
-                specific_loss += tf.constant(FLAGS.boundary_loss_weight, dtype=tf.float32) * boundary_loss_op
+                specific_loss += boundary_loss_op * scalar_boundary_loss_weight
               g_i = optimizer.compute_gradients(specific_loss)
               
               ##Tensor containing the weighted values of the nonzero label voxels
@@ -649,7 +646,6 @@ def train():
             
             sum_zero_op += [specific_dice_sum.assign(tf.zeros_like(specific_dice_sum))]
             sum_zero_op += [specific_jaccard_sum.assign(tf.zeros_like(specific_jaccard_sum))]
-            sum_zero_op += [boundary_loss_sum.assign(tf.zeros_like(boundary_loss_sum))]
             
             sum_accum_op = [n_ab.assign_add(1.)]
 
@@ -671,7 +667,9 @@ def train():
             sum_accum_op += [specific_dice_sum.assign_add(specific_dice_op)]
             sum_accum_op += [specific_jaccard_sum.assign_add(specific_jaccard_op)]
 
-            sum_accum_op += [boundary_loss_sum.assign_add(boundary_loss_op)]
+            if FLAGS.distance_map_index >= 0:
+              sum_zero_op += [boundary_loss_sum.assign(tf.zeros_like(boundary_loss_sum))]
+              sum_accum_op += [boundary_loss_sum.assign_add(boundary_loss_op)]
         # # epoch checkpoint manipulation
         start_epoch = tf.get_variable("start_epoch", shape=[1], initializer= tf.zeros_initializer,dtype=tf.int32)
         start_epoch_inc = start_epoch.assign(start_epoch+1)
