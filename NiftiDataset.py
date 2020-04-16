@@ -970,15 +970,16 @@ class RandomRotation(object):
     # Assume there is some uninteresting stuff at the edge of the image.
     # We could rotate around a chosen label centroid, and throw out some information,
     # This is more conservative in terms of retaining information but is maybe more memory intensive.
-    resampler = sitk.ResampleImageFilter()
+    
+    #resampler = sitk.ResampleImageFilter()
     # Perform the interpolation
     image_size = label.GetSize()
     reference_size = tuple([math.ceil(i*1.5) for i in list(image_size)])
-    resampler.SetOutputSpacing(label.GetSpacing())
-    resampler.SetSize(reference_size)
-    resampler.SetInterpolator(sitk.sitkLinear)
-    resampler.SetOutputOrigin(label.GetOrigin())
-    resampler.SetOutputDirection(label.GetDirection())
+    #resampler.SetOutputSpacing(label.GetSpacing())
+    #resampler.SetSize(reference_size)
+    #resampler.SetInterpolator(sitk.sitkLinear)
+    #resampler.SetOutputOrigin(label.GetOrigin())
+    #resampler.SetOutputDirection(label.GetDirection())
     #reference = resampler.Execute(label)
     reference = label
 

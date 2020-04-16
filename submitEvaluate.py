@@ -12,8 +12,7 @@ jobfolder = "./jobs/"
 #data_dir = '/data/deasy/DylanHsu/N200_1mm3/nifti'
 patch_size  = 48 
 patch_layer = 48 
-stride_inplane = 48
-#stride_layer   = 4
+stride_inplane = 8
 stride_layer   = stride_inplane
 
 #subgroup=5
@@ -21,21 +20,29 @@ stride_layer   = stride_inplane
 #suffix = '-48mm-noSmallBias-subgroup%d'%subgroup
 #checkpoint_path='tmp/ckpt/checkpoint_n401-48mm-noSmallBias-subgroup%d-1073'%subgroup
 
-#sg=1; checkpoint_path='tmp/ckpt/bak/checkpoint_n401-48mm-minSmall5x-subgroup1-1484'
-#sg=2; checkpoint_path='tmp/ckpt/bak/checkpoint_n401-48mm-minSmall5x-subgroup2-1470'
-#sg=3; checkpoint_path='tmp/ckpt/bak/checkpoint_n401-48mm-minSmall5x-subgroup3-1456'
-#sg=4; checkpoint_path='tmp/ckpt/bak/checkpoint_n401-48mm-minSmall5x-subgroup4-1470'
-sg=5; checkpoint_path='tmp/ckpt/bak/checkpoint_n401-48mm-minSmall5x-subgroup5-1560'
-#sg=1; checkpoint_path='tmp/ckpt/bak/checkpoint_n401-48mm-noSmallBias-subgroup1-1566'
-#sg=2; checkpoint_path='tmp/ckpt/bak/checkpoint_n401-48mm-noSmallBias-subgroup2-1508'
-#sg=3; checkpoint_path='tmp/ckpt/bak/checkpoint_n401-48mm-noSmallBias-subgroup3-1566'
-#sg=4; checkpoint_path='tmp/ckpt/bak/checkpoint_n401-48mm-noSmallBias-subgroup4-1421'
-#sg=5; checkpoint_path='tmp/ckpt/bak/checkpoint_n401-48mm-noSmallBias-subgroup5-1450'
-suffix = '-48mm-minSmall5x-subgroup%d-stride%d'%(sg,stride_inplane)
+#sg=1; checkpoint_path='tmp/ckpt/checkpoint_n401-48mm-minSmall5x-mrct-subgroup1-645'
+#sg=2; checkpoint_path='tmp/ckpt/checkpoint_n401-48mm-minSmall5x-mrct-subgroup2-510'
+#sg=3; checkpoint_path='tmp/ckpt/checkpoint_n401-48mm-minSmall5x-mrct-subgroup3-810'
+#sg=4; checkpoint_path='tmp/ckpt/checkpoint_n401-48mm-minSmall5x-mrct-subgroup4-810'
+#sg=5; checkpoint_path='tmp/ckpt/checkpoint_n401-48mm-minSmall5x-mrct-subgroup5-750'
+
+#sg=1; checkpoint_path='tmp/ckpt/checkpoint_n401-48mm-mrct-alpha0p8-subgroup1-780'
+#sg=2; checkpoint_path='tmp/ckpt/checkpoint_n401-48mm-mrct-alpha0p8-subgroup2-885'
+#sg=3; checkpoint_path='tmp/ckpt/checkpoint_n401-48mm-mrct-alpha0p8-subgroup3-660'
+#sg=4; checkpoint_path='tmp/ckpt/checkpoint_n401-48mm-mrct-alpha0p8-subgroup4-885'
+#sg=5; checkpoint_path='tmp/ckpt/checkpoint_n401-48mm-mrct-alpha0p8-subgroup5-765'
+#sg=1; checkpoint_path='tmp/ckpt/checkpoint_n401-48mm-mrct-subgroup1-915'
+#sg=2; checkpoint_path='tmp/ckpt/checkpoint_n401-48mm-mrct-subgroup2-780'
+#sg=3; checkpoint_path='tmp/ckpt/checkpoint_n401-48mm-mrct-subgroup3-885'
+#sg=4; checkpoint_path='tmp/ckpt/checkpoint_n401-48mm-mrct-subgroup4-765'
+sg=5; checkpoint_path='tmp/ckpt/checkpoint_n401-48mm-mrct-subgroup5-855'
+
+#suffix = '-mrct-alpha0p8-subgroup%d'%(sg)
+suffix = '-mrct-subgroup%d'%(sg)
+#suffix = '-48mm-minSmall5x-subgroup%d-stride%d'%(sg,stride_inplane)
 #suffix = '-48mm-noSmallBias-subgroup%d'
-data_dir='/data/deasy/DylanHsu/N401_unstripped/subgroup%d/testing'%(sg)
-
-
+#data_dir='/data/deasy/DylanHsu/N401_unstripped/subgroup%d/testing'%(sg)
+data_dir='/data/deasy/DylanHsu/SRS_N401/subgroup%d/testing'%(sg)
 
 model_path = checkpoint_path + '.meta'
 

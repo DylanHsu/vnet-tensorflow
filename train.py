@@ -148,7 +148,7 @@ def train():
     latest_filename = "checkpoint"
     if FLAGS.is_batch_job and FLAGS.batch_job_name is not '':
         latest_filename = latest_filename + "_" + FLAGS.batch_job_name
-        resource.setrlimit(resource.RLIMIT_CORE,(524288,-1))
+        #resource.setrlimit(resource.RLIMIT_CORE,(524288,-1))
     latest_filename += "_latest"
     
     image_filenames_list = FLAGS.image_filenames.split(',')
