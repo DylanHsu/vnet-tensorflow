@@ -38,7 +38,8 @@ for config in configs:
   f.write("#BSUB -eo "+jobfolder+"/logs/"+jobname+"_%J.stderr\n")
   f.write("\n")
   f.write("source /home/hsud3/.bash_profile\n")
-  f.write("cd /home/hsud3/vnet-tensorflow \n")
+  #f.write("cd /home/hsud3/vnet-tensorflow \n")
+  f.write("cd /home/hsud3/dev-vnet-tensorflow \n")
   f.write("python cacheAugmentation.py %s \n"%(config['case']))
   f.close()
 # Submit jobs.

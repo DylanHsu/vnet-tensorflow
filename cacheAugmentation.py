@@ -6,21 +6,24 @@ import math
 import datetime
 import shutil
 from glob import glob
+import srsPre.fsOneHotEncoding
+import srsPre.makeFsGroupLabels 
 
 nAug=50
 input_data_dir='/data/deasy/DylanHsu/SRS_N401/nifti'
-output_data_dir='/data/deasy/DylanHsu/SRS_N401/augcache'
-image_filenames=('mr1.nii.gz', 'ct.nii.gz')
+output_data_dir='/data/deasy/DylanHsu/SRS_N401/augcache2'
+image_filenames=('mr1.nii.gz', 'ct.nii.gz', 'aseg.nii.gz')
 label_filename='label_smoothed.nii.gz'
 
 case = sys.argv[1]
 
+#interpolators = [sitk.sitkBSpline, sitk.sitkBSpline, sitk.sitkNearestNeighbor]
 augTransforms = [
   NiftiDataset.RandomHistoMatch(0, input_data_dir, image_filenames[0], 1.0),
   NiftiDataset.StatisticalNormalization(0, 5.0, 5.0, nonzero_only=True, zero_floor=True), # MR [0,999999] -> [0,255]
   NiftiDataset.ManualNormalization(1, 0, 100.), # CT [0,100] H.U. -> [0,255] Arbitrary units
-  NiftiDataset.BSplineDeformation(),
-  NiftiDataset.RandomRotation(maxRot = 20*0.01745),  # 20 degrees
+  NiftiDataset.BSplineDeformation(interpolator=[sitk.sitkBSpline, sitk.sitkBSpline, sitk.sitkNearestNeighbor]),
+  NiftiDataset.RandomRotation(maxRot = 20*0.01745, interpolator=[sitk.sitkLinear, sitk.sitkLinear, sitk.sitkNearestNeighbor]),  # 20 degrees
   NiftiDataset.ThresholdCrop(),
   ]
 augDataset = NiftiDataset.NiftiDataset(
@@ -43,6 +46,7 @@ writer = sitk.ImageFileWriter()
 writer.UseCompressionOn()
 statFilter = sitk.StatisticsImageFilter()
 distanceMapFilter = sitk.SignedDanielssonDistanceMapImageFilter()
+fsLabelDict, fsNamedGroups, fsNumberedGroups = srsPre.fsOneHotEncoding.fsDicts()
 for iAug in range(1, nAug+1):
   slug = "{0:s}_aug{1:03d}".format(case,iAug)
   
@@ -60,7 +64,7 @@ for iAug in range(1, nAug+1):
   output_case_dir = os.path.join(output_data_dir, slug)
   if os.path.isdir(output_case_dir):
     shutil.rmtree(output_case_dir)
-  os.mkdir(output_case_dir)
+  os.makedirs(output_case_dir,exist_ok=True)
   for iImage in range(len(image_filenames)):
     writer.SetFileName(os.path.join(output_case_dir, image_filenames[iImage]))
     writer.Execute(sample_tfm['image'][iImage])
@@ -72,5 +76,8 @@ for iAug in range(1, nAug+1):
   distanceMap = distanceMapFilter.Execute( sample_tfm['label'], False, False, False)
   writer.SetFileName( os.path.join(output_case_dir, "distance_map.nii.gz") )
   writer.Execute(distanceMap)
-
+  
+  if 'aseg.nii.gz' in image_filenames:
+    aseg = sample_tfm['image'][image_filenames.index('aseg.nii.gz')]
+    srsPre.makeFsGroupLabels.writeGroups(output_case_dir, aseg, fsNumberedGroups)
 
