@@ -120,10 +120,9 @@ for dataset in ['testing']:
       reader.SetFileName(aseg_path)
       aseg = reader.Execute()
       # This is suboptimal, but I couldn't figure out the correct settings to get PasteImageFilter working
-      aseg = sitk.Resample(aseg, trueLabel.GetSize(), sitk.Transform(), sitk.sitkNearestNeighbor, trueLabel.GetOrigin(), trueLabel.GetSpacing(), trueLabel.GetDirection(), 0, aseg.GetPixelID())
+      #aseg = sitk.Resample(aseg, trueLabel.GetSize(), sitk.Transform(), sitk.sitkNearestNeighbor, trueLabel.GetOrigin(), trueLabel.GetSpacing(), trueLabel.GetDirection(), 0, aseg.GetPixelID())
       #castImageFilter.SetOutputPixelType( aseg.GetPixelID() )
       #pasteFilter.Execute( castImageFilter.Execute(trueLabel), aseg)
-      # This is suboptimal
       
 
     #image_np = sitk.GetArrayFromImage(image)
