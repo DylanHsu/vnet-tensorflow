@@ -1038,18 +1038,23 @@ class ThresholdCrop(object):
     # Build a composite image from the slices and the label
     # The bounding box must contain the average of the image slices and the label
     # alternative: could require it contain the sum of the slices
-    composite_image = image[0]
-    aif = sitk.AddImageFilter()
-    if len(image) > 1:
-      for i in range(1,len(image)):
-        composite_image = aif.Execute(composite_image, image[i])
-      dif = sitk.DivideImageFilter()
-      # Here we are taking the average, comment out to take the sum
-      composite_image = dif.Execute(composite_image, len(image))
-
+    #aif = sitk.AddImageFilter()
+    maxFilter = sitk.MaximumImageFilter()
+    statisticsFilter = sitk.StatisticsImageFilter()
     castImageFilter = sitk.CastImageFilter()
     castImageFilter.SetOutputPixelType(sitk.sitkFloat32)
-    composite_image = aif.Execute(composite_image, castImageFilter.Execute(label))
+    
+    temp_image = image[0]
+    statisticsFilter.Execute(temp_image)
+    temp_image = castImageFilter.Execute(temp_image / statisticsFilter.GetMaximum())
+    composite_image = temp_image
+    if len(image) > 1:
+      for i in range(1,len(image)):
+        temp_image = image[i]
+        statisticsFilter.Execute(temp_image)
+        temp_image = castImageFilter.Execute(temp_image / statisticsFilter.GetMaximum())
+        composite_image = maxFilter.Execute(composite_image, temp_image)
+    composite_image = maxFilter.Execute(composite_image, castImageFilter.Execute(label))
         
     # Set pixels that are in [min_intensity,otsu_threshold] to inside_value, values above otsu_threshold are
     # set to outside_value. The anatomy has higher intensity values than the background, so it is outside.
