@@ -571,7 +571,7 @@ class Resample(object):
 		Currently only support linear interpolation method
   """
 
-  def __init__(self, voxel_size):
+  def __init__(self, voxel_size, interpolator=sitk.sitkLinear):
     self.name = 'Resample'
 
     assert isinstance(voxel_size, (float, tuple))
@@ -580,10 +580,23 @@ class Resample(object):
     else:
       assert len(voxel_size) == 3
       self.voxel_size = voxel_size
+    
+    if type(interpolator) is list:
+      for i,alg in enumerate(interpolator):
+        assert alg in allowedInterpolators, "Interpolator %d (position %d) passed to RandomRotation is not an allowed interpolator"%(alg,i)
+    else:
+      assert interpolator in allowedInterpolators, "Interpolator %d passed to RandomRotation is not an allowed interpolator"%(interpolator)
+    self.interpolator = interpolator
 
   def __call__(self, sample):
     image, label = sample['image'], sample['label']
     
+    if type(self.interpolator) is list:
+      assert len(self.interpolator) == len(image), "Length of interpolators passed to RandomRotation (%d) does not match image depth (%d)"%(len(self.interpolator),len(image))
+      interpolatorList = self.interpolator
+    else:
+      interpolatorList = [self.interpolator] * len(image)
+  
     old_spacing = label.GetSpacing()
     old_size = label.GetSize()
     
@@ -595,14 +608,15 @@ class Resample(object):
     new_size = tuple(new_size)
 
     resampler = sitk.ResampleImageFilter()
-    resampler.SetInterpolator(2)
     resampler.SetOutputSpacing(new_spacing)
     resampler.SetSize(new_size)
 
     # resample on image
     resampler.SetOutputOrigin(label.GetOrigin())
     resampler.SetOutputDirection(label.GetDirection())
-    image[:] = [resampler.Execute(volume) for volume in image]
+    for i,volume in enumerate(image):
+      resampler.SetInterpolator(interpolatorList[i])
+      image[:] = resampler.Execute(volume)
 
     # resample on segmentation
     resampler.SetInterpolator(sitk.sitkNearestNeighbor)
@@ -888,7 +902,7 @@ class BSplineDeformation(object):
     randomness (int,float): BSpline deformation scaling factor, default is 10.
   """
 
-  def __init__(self, randomness=10):
+  def __init__(self, randomness=10, interpolator=sitk.sitkBSpline):
     self.name = 'BSpline Deformation'
 
     assert isinstance(randomness, (int,float))
@@ -896,9 +910,22 @@ class BSplineDeformation(object):
       self.randomness = randomness
     else:
       raise RuntimeError('Randomness should be non zero values')
+    assert isinstance(interpolator, (int,list))
+    allowedInterpolators=[sitk.sitkNearestNeighbor, sitk.sitkLinear, sitk.sitkBSpline, sitk.sitkGaussian, sitk.sitkHammingWindowedSinc, sitk.sitkBlackmanWindowedSinc, sitk.sitkCosineWindowedSinc, sitk.sitkWelchWindowedSinc, sitk.sitkLanczosWindowedSinc]
+    if type(interpolator) is list:
+      for i,alg in enumerate(interpolator):
+        assert alg in allowedInterpolators, "Interpolator %d (position %d) passed to BSplineDeformation is not an allowed interpolator"%(alg,i)
+    else:
+      assert interpolator in allowedInterpolators, "Interpolator %d passed to BSplineDeformation is not an allowed interpolator"%(interpolator)
+    self.interpolator = interpolator
 
   def __call__(self,sample):
     image, label = sample['image'], sample['label']
+    if type(self.interpolator) is list:
+      assert len(self.interpolator) == len(image), "Length of interpolators passed to BSplineDeformation (%d) does not match image depth (%d)"%(len(self.interpolator),len(image))
+      interpolatorList = self.interpolator
+    else:
+      interpolatorList = [self.interpolator] * len(image)
     spline_order = 3
     # Assuming that all the volumes in image[:] are the same!
     domain_physical_dimensions = [label.GetSize()[0]*label.GetSpacing()[0],label.GetSize()[1]*label.GetSpacing()[1],label.GetSize()[2]*label.GetSpacing()[2]]
@@ -912,10 +939,10 @@ class BSplineDeformation(object):
     # Random displacement of the control points.
     originalControlPointDisplacements = np.random.random(len(bspline.GetParameters()))*self.randomness
     bspline.SetParameters(originalControlPointDisplacements)
-
-    image[:] = [sitk.Resample(volume, bspline) for volume in image]
-    #label = sitk.Resample(label, bspline)
+    
     reference = label
+    for i,volume in enumerate(image):
+      image[i] = sitk.Resample(volume, reference, bspline, interpolatorList[i], 0)
     label = sitk.Resample(label, reference, bspline, sitk.sitkNearestNeighbor, 0)
     return {'image': image, 'label': label}
 
@@ -930,12 +957,24 @@ class RandomRotation(object):
 
   def __init__(self, interpolator=sitk.sitkBSpline, maxRot=2*np.pi):
     self.name = 'RandomRotation'
-    self.interpolator = interpolator
     self.maxRot = maxRot
-
+    assert isinstance(interpolator, (int,list))
+    allowedInterpolators=[sitk.sitkNearestNeighbor, sitk.sitkLinear, sitk.sitkBSpline, sitk.sitkGaussian, sitk.sitkHammingWindowedSinc, sitk.sitkBlackmanWindowedSinc, sitk.sitkCosineWindowedSinc, sitk.sitkWelchWindowedSinc, sitk.sitkLanczosWindowedSinc]
+    if type(interpolator) is list:
+      for i,alg in enumerate(interpolator):
+        assert alg in allowedInterpolators, "Interpolator %d (position %d) passed to RandomRotation is not an allowed interpolator"%(alg,i)
+    else:
+      assert interpolator in allowedInterpolators, "Interpolator %d passed to RandomRotation is not an allowed interpolator"%(interpolator)
+    self.interpolator = interpolator
+  
   def __call__(self, sample):
     image, label = sample['image'], sample['label']
-   
+    if type(self.interpolator) is list:
+      assert len(self.interpolator) == len(image), "Length of interpolators passed to RandomRotation (%d) does not match image depth (%d)"%(len(self.interpolator),len(image))
+      interpolatorList = self.interpolator
+    else:
+      interpolatorList = [self.interpolator] * len(image)
+      
     ## choose label as centroid
     #ccFilter = sitk.ConnectedComponentImageFilter()
     #labelCC = ccFilter.Execute(label)
@@ -971,19 +1010,12 @@ class RandomRotation(object):
     # We could rotate around a chosen label centroid, and throw out some information,
     # This is more conservative in terms of retaining information but is maybe more memory intensive.
     
-    #resampler = sitk.ResampleImageFilter()
     # Perform the interpolation
     image_size = label.GetSize()
     reference_size = tuple([math.ceil(i*1.5) for i in list(image_size)])
-    #resampler.SetOutputSpacing(label.GetSpacing())
-    #resampler.SetSize(reference_size)
-    #resampler.SetInterpolator(sitk.sitkLinear)
-    #resampler.SetOutputOrigin(label.GetOrigin())
-    #resampler.SetOutputDirection(label.GetDirection())
-    #reference = resampler.Execute(label)
     reference = label
-
-    image[:] = [sitk.Resample(volume, reference, rotation, self.interpolator, 0) for volume in image]
+    for i,volume in enumerate(image):
+      image[i] = sitk.Resample(volume, reference, rotation, interpolatorList[i], 0)
     # Label interpolation must be nearest neighbor
     label = sitk.Resample(label, reference, rotation, sitk.sitkNearestNeighbor, 0)
     return {'image': image, 'label': label}
