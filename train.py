@@ -426,6 +426,8 @@ def train():
             if FLAGS.distance_map_index >= 0:
               #scalar_boundary_loss_weight = tf.constant(FLAGS.boundary_loss_weight, dtype=tf.float32)
               scalar_boundary_loss_weight = tf.get_variable("scalar_boundary_loss_weight", initializer=tf.constant(FLAGS.boundary_loss_weight), dtype=tf.float32, trainable=False)
+              increase_boundary_loss_weight_op = scalar_boundary_loss_weight.assign(scalar_boundary_loss_weight + FLAGS.boundary_loss_weight)
+
               boundary_loss_sum  = tf.get_variable("boundary_loss_sum" , dtype=tf.float32, trainable=False, initializer=tf.constant(0.))
               boundary_loss_op = tf.reduce_sum(tf.multiply(softmax_op[:,:,:,:,1], aux_placeholder[:,:,:,:,distance_map_aux_channel]))
               #print("shapes",softmax_op[:,:,:,:,1].get_shape(), aux_placeholder[:,:,:,:,distance_map_aux_channel].get_shape(), boundary_loss_op.get_shape())
@@ -734,9 +736,9 @@ def train():
               logger.info("Epoch %d starts"%(epoch+1))
               
               # Boundary loss scheduler
-              if epoch>0 and (epoch%10)==0:
-                current_boundary_loss_weight = sess.run(scalar_boundary_loss_weight)
-                sess.run(scalar_boundary_loss_weight.assign(10*current_boundary_loss_weight))
+              if FLAGS.distance_map_index >= 0:
+                if epoch>0: #and (epoch%10)==0:
+                  sess.run(increase_boundary_loss_weight_op)
 
               # training phase
               #n_train = 0
