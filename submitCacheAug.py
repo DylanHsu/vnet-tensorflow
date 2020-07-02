@@ -7,7 +7,7 @@ jobfolder = "./jobs/"
 cpu_cores = 4 
 cpu_ram = 16
 #case_dir = "/data/deasy/DylanHsu/N401_unstripped/nifti/"
-case_dir = "/data/deasy/DylanHsu/SRS_N401/nifti/"
+case_dir = "/data/deasy/DylanHsu/SRS_N514/nifti/"
 # Clear job folder
 #old_jobs = glob(jobfolder + "*")
 #for oj in old_jobs:
@@ -39,7 +39,7 @@ for config in configs:
   f.write("\n")
   f.write("source /home/hsud3/.bash_profile\n")
   #f.write("cd /home/hsud3/vnet-tensorflow \n")
-  f.write("cd /home/hsud3/dev-vnet-tensorflow \n")
+  f.write("cd /home/hsud3/vnet-tensorflow \n")
   f.write("python cacheAugmentation.py %s \n"%(config['case']))
   f.close()
 # Submit jobs.

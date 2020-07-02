@@ -23,7 +23,11 @@ args = parser.parse_args()
 label_name = 'label_smoothed.nii.gz'
 prob_name = 'probability_vnet'+'-'+args.suffix+'.nii.gz'
 #prob_name = 'probability_centernet-%s.nii.gz'%args.suffix
-stats_dir='/data/deasy/DylanHsu/SRS_N401/stats/stats'+'-'+args.suffix
+stats_dir='/data/deasy/DylanHsu/SRS_N514/stats/stats'+'-'+args.suffix
+
+# datasets to run the scan on
+datasets = ['testing']
+#datasets = ['training_noaug']
 try:
   os.makedirs(stats_dir)
 except FileExistsError:
@@ -48,11 +52,7 @@ if args.overlay_freesurfer:
     #  fsLabelToGroupMapping[index] = 'Null'
     #  print('FS index %d "%s" mapped to Null group'%(index,fsLabelDict[index]))
       
-        
-
-
-#for dataset in ['training','testing']:
-for dataset in ['testing']:
+for dataset in datasets:
   probfiles = glob(os.path.join(args.data_dir, dataset, '*', prob_name))
   cases = [os.path.basename(os.path.dirname(probfile)) for probfile in probfiles]
   #cases = cases[:5]
@@ -134,6 +134,7 @@ for dataset in ['testing']:
     trueLabelCC = ccFilter.Execute(trueLabel)
     trueLabelShapeFilter.Execute(trueLabelCC)
     trueLabelMap=mapFilter.Execute(trueLabelCC,0)
+    assert trueLabelShapeFilter.GetNumberOfLabels()>0, 'No true labels for case %s'%case
       
     #label_np = np.where(softmax_np > float(args.threshold), 1,0)
   
@@ -415,6 +416,8 @@ for dataset in ['testing']:
   else:
     avgLesionDice = 0.
     avgLesionDiceError = 0.
+    avgLesionHausdorff = 0.
+    avgLesionHausdorffError = 0.
   
   filename = 'stats_%s-seed%.3f-seg%.3f-%s'%(dataset,args.threshold,args.seg_threshold,args.suffix)
   filename = filename.replace(".","p")

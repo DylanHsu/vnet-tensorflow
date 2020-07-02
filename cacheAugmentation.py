@@ -10,8 +10,8 @@ import srsPre.fsOneHotEncoding
 import srsPre.makeFsGroupLabels 
 
 nAug=50
-input_data_dir='/data/deasy/DylanHsu/SRS_N401/nifti'
-output_data_dir='/data/deasy/DylanHsu/SRS_N401/augcache2'
+input_data_dir='/data/deasy/DylanHsu/SRS_N514/nifti'
+output_data_dir='/data/deasy/DylanHsu/SRS_N514/augcache'
 image_filenames=('mr1.nii.gz', 'ct.nii.gz', 'aseg.nii.gz')
 label_filename='label_smoothed.nii.gz'
 
