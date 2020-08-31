@@ -4,62 +4,110 @@ import numpy as np
 # Setup job configs
 
 jobfolder = "./jobs/"
-cpu_cores = 8
-cpu_ram = 8
-care_about_segmentation = True
-start = 0.1
-stop = 1.0
-step = 0.05
-seg_step = 0.05
+cpu_cores = 16
+cpu_ram = 16
+
+roc_mode=False
+
+if roc_mode:
+  start = 0
+  stop = 1.0
+  step = 0.001
+  seg_step = 1
+else:
+  start = 0.1
+  stop = 1.0
+  step = 0.01 #0.05
+  seg_step = 0.05
 dilate_threshold = 0.00
-data_dir = '/data/deasy/DylanHsu/SRS_N514'
-#suffix='48mm-minSmall5x-depth33444'
+data_dir = '/data/deasy/DylanHsu/SRS_N511'
+
 suffixes = []
-suffixes += ['32mm-mrct-LB1-subgroup%d']
-#suffixes += ['48mm-mrctfs-LB1-subgroup%d']
-#suffixes += ['48mm-mrctfs-subgroup%d']
-#suffixes += ['48mm-mrct-LB1-deep-subgroup%d']
-#suffixes += ['48mm-mrct-LB1-dr0p00-subgroup%d']
-#suffixes += ['48mm-mrct-LB1-dr0p75-subgroup%d']
-#suffixes += ['48mm-mrct-LB1-subgroup%d']
-#suffixes += ['48mm-mrct-LB2-subgroup%d']
-#suffixes += ['48mm-mrct-subgroup%d']
-#suffixes += ['48mm-mr-subgroup%d']
-#suffixes += ['64mm-mrct-LB1-subgroup%d']
+#suffixes += ['48mm-mr-%s']
+#suffixes += ['48mm-mr-LB1-%s']
+#suffixes += ['48mm-mr-LB2-%s']
+suffixes += ['48mm-mrct-%s']
+suffixes += ['48mm-mrctfs-%s']
+suffixes += ['48mm-mrctfs-LB1-%s']
+#suffixes += ['48mm-mrctfs-LB2-%s']
+suffixes += ['48mm-mrct-LB1-%s']
+suffixes += ['48mm-mrct-LB1-deep-%s']
+suffixes += ['48mm-mrct-LB1-dr0p00-%s']
+suffixes += ['48mm-mrct-LB1-dr0p75-%s']
+suffixes += ['40mm-mrct-LB1-%s']
+suffixes += ['48mm-mrct-LB2-%s']
+suffixes += ['56mm-mrct-LB1-%s']
+suffixes += ['64mm-mrct-LB1-%s']
+
+#groups = ['subgroup1','subgroup2','subgroup3','subgroup4','subgroup5']
+groups = ['subgroup1','subgroup2','subgroup3','subgroup4','subgroup5','final']
+#groups = ['final']
+if roc_mode:
+  # Linear sampling between P=0.01 and P=0.99
+  # Logarithmic sampling outside that window
+  thresholds = np.concatenate((np.power( np.power(10,1/3.), np.arange(-36,-6,1)),  np.arange( 0.01, 0.99, 0.01 ), 1 - np.power( np.power(10,1/3.), np.arange(-7,-37,-1))))
+else:
+  thresholds = np.arange(start,stop,step)
+
+
+jobfile = os.path.join(jobfolder,'scanThreshold-pack%03d.lsf')
+jobpack=1
+f = open(jobfile % jobpack,"w+")
+packed=0
+packsize=1000
 
 for suffix in suffixes:
-  for subgroup in [1,2,3,4,5]:
-    sg_suffix = suffix % (subgroup)
-    sg_dir = os.path.join(data_dir,'subgroup%d'%(subgroup))
+  for subgroup in groups:
+    sg_suffix = suffix % subgroup
+    os.makedirs(os.path.join(jobfolder,'logs',sg_suffix),exist_ok=True)
+    sg_dir = os.path.join(data_dir,subgroup)
+    if roc_mode:
+      stats_dir = os.path.join(data_dir,'stats','roc-'+sg_suffix)
+    else:
+      stats_dir = os.path.join(data_dir,'stats','stats-'+sg_suffix)
     
-    for threshold in np.arange(start,stop,step):
-      if care_about_segmentation:
-        seg_thresholds = np.arange(seg_step,threshold+seg_step*0.99,seg_step) #0.99 is there cause otherwise weird float behavior includes the endpoint
+    counter=0
+    for threshold in thresholds:
+      counter+=1
+      if roc_mode:
+        seg_thresholds = [threshold]
       else:
         seg_thresholds = [threshold]
+        #seg_thresholds = np.arange(seg_step,threshold+seg_step*0.99,seg_step) #0.99 is there cause otherwise weird float behavior includes the endpoint
       for seg_threshold in seg_thresholds:
-        jobname = 'scanThreshold-seed%.3f-seg%.3f-%s'%(threshold,seg_threshold,sg_suffix)
-        jobname = jobname.replace('.','p')
-        jobfile = os.path.join(jobfolder,jobname+".lsf")
-        # Setup job files
-        f = open(jobfile,"w+")
-        f.write("#!/bin/bash\n")
-        f.write("#BSUB -J "+jobname+"\n")
-        f.write("#BSUB -n %d\n" % cpu_cores)
-        f.write("#BSUB -q cpuqueue\n")
-        f.write("#BSUB -R span[hosts=1]\n")
-        f.write("#BSUB -R rusage[mem=%d]\n" % (cpu_ram//cpu_cores))
-        f.write("#BSUB -W 12:00\n")
-        f.write("#BSUB -o " +jobfolder+"/logs/"+jobname+"_%J.stdout\n")
-        f.write("#BSUB -eo "+jobfolder+"/logs/"+jobname+"_%J.stderr\n")
-        f.write("\n")
-        f.write("source /home/hsud3/.bash_profile\n")
-        f.write("cd /home/hsud3/vnet-tensorflow \n")
-        if dilate_threshold > 0.0:
-          f.write('python scanThreshold.py --dilate_threshold %.3f %s %s %.3f %.3f\n' % (dilate_threshold, sg_suffix, sg_dir, threshold, seg_threshold))
+        if roc_mode:
+          jobname = 'scanRocCurve-%03d-%s'%(counter,sg_suffix)
         else:
-          f.write('python scanThreshold.py %s %s %.3f %.3f\n' % (sg_suffix, sg_dir, threshold, seg_threshold))
-        f.close()
-        # Submit jobs.
-        the_command = "bsub < " + jobfile
-        os.system(the_command)
+          jobname = 'scanThreshold-seed%.3f-seg%.3f-%s'%(threshold,seg_threshold,sg_suffix)
+          jobname = jobname.replace('.','p')
+        
+        f.write(" -J "+jobname)
+        f.write(" -n %d" % cpu_cores)
+        f.write(" -q cpuqueue")
+        f.write(" -R span[hosts=1]")
+        f.write(" -R rusage[mem=%d]" % (cpu_ram//cpu_cores))
+        f.write(" -W 12:00")
+        f.write(" -o " +os.path.join(jobfolder,'logs',sg_suffix,jobname+"_%J.stdout"))
+        f.write(" -eo "+os.path.join(jobfolder,'logs',sg_suffix,jobname+"_%J.stderr"))
+        f.write(" source /home/hsud3/.bash_profile;")
+        f.write(" cd /home/hsud3/vnet-tensorflow;")
+        flags = ""
+        if dilate_threshold > 0.0:
+          flags += " --dilate_threshold %.3f"%dilate_threshold
+        if roc_mode:
+          flags += " --no_lesions"
+        f.write(" python scanThreshold.py %s %s %s %s %.12f %.12f\n" % (flags, sg_suffix, sg_dir, stats_dir, threshold, seg_threshold))
+        
+        packed += 1
+        if packed >= packsize:
+          f.close()
+          print("Submitting job pack: "+(jobfile % jobpack))
+          os.system("bsub -pack " + (jobfile % jobpack) + " 2>&1 | grep -v \"is submitted to queue\"")
+          jobpack += 1
+          f = open(jobfile % jobpack,"w+")
+          packed=0
+
+f.close()
+if packed > 0:
+  os.system("bsub -pack " + (jobfile % jobpack))
+
