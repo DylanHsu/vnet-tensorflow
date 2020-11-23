@@ -10,9 +10,9 @@ import srsPre.fsOneHotEncoding
 import srsPre.makeFsGroupLabels 
 
 nAug=50
-input_data_dir='/data/deasy/DylanHsu/SRS_N514/nifti'
-output_data_dir='/data/deasy/DylanHsu/SRS_N514/augcache'
-image_filenames=('mr1.nii.gz', 'ct.nii.gz', 'aseg.nii.gz')
+input_data_dir='/data/deasy/DylanHsu/SRS_N511/nifti'
+output_data_dir='/data/deasy/DylanHsu/SRS_N511/augcache'
+image_filenames=('mr1.nii.gz', 'mr2.nii.gz', 'ct.nii.gz', 'aseg.nii.gz')
 label_filename='label_smoothed.nii.gz'
 
 case = sys.argv[1]
@@ -21,9 +21,10 @@ case = sys.argv[1]
 augTransforms = [
   NiftiDataset.RandomHistoMatch(0, input_data_dir, image_filenames[0], 1.0),
   NiftiDataset.StatisticalNormalization(0, 5.0, 5.0, nonzero_only=True, zero_floor=True), # MR [0,999999] -> [0,255]
-  NiftiDataset.ManualNormalization(1, 0, 100.), # CT [0,100] H.U. -> [0,255] Arbitrary units
-  NiftiDataset.BSplineDeformation(interpolator=[sitk.sitkBSpline, sitk.sitkBSpline, sitk.sitkNearestNeighbor]),
-  NiftiDataset.RandomRotation(maxRot = 20*0.01745, interpolator=[sitk.sitkLinear, sitk.sitkLinear, sitk.sitkNearestNeighbor]),  # 20 degrees
+  NiftiDataset.StatisticalNormalization(1, 5.0, 5.0, nonzero_only=True, zero_floor=True), # MR [0,999999] -> [0,255]
+  NiftiDataset.ManualNormalization(2, 0, 100.), # CT [0,100] H.U. -> [0,255] Arbitrary units
+  NiftiDataset.BSplineDeformation(interpolator=[sitk.sitkBSpline, sitk.sitkBSpline, sitk.sitkBSpline, sitk.sitkNearestNeighbor]),
+  NiftiDataset.RandomRotation(maxRot = 20*0.01745, interpolator=[sitk.sitkLinear, sitk.sitkLinear, sitk.sitkLinear, sitk.sitkNearestNeighbor]),  # 20 degrees
   NiftiDataset.ThresholdCrop(),
   ]
 augDataset = NiftiDataset.NiftiDataset(

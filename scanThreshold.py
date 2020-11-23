@@ -26,7 +26,9 @@ if args.no_lesions:
 else:
   doLesions = True
 
-#image_name = 'img.nii.gz'
+sitk.ProcessObject.SetGlobalDefaultNumberOfThreads(16)
+
+image_name = 'mr1.nii.gz'
 label_name = 'label_smoothed.nii.gz'
 prob_name = 'probability_vnet'+'-'+args.suffix+'.nii.gz'
 #prob_name = 'probability_centernet-%s.nii.gz'%args.suffix
@@ -106,35 +108,36 @@ for dataset in datasets:
   globalLesionStats=[]
   for case in cases:
     print('analyzing case',case)
-    #image_path = os.path.join(args.data_dir, dataset, case, 'img.nii.gz')
+    image_path = os.path.join(args.data_dir, dataset, case, image_name)
     label_path = os.path.join(args.data_dir, dataset, case, label_name)
     prob_path  = os.path.join(args.data_dir, dataset, case, prob_name)
     
     # Instantiate filters
-    aif             = sitk.AddImageFilter()
-    btif            = sitk.BinaryThresholdImageFilter()
-    castImageFilter = sitk.CastImageFilter()
-    ccFilter        = sitk.ConnectedComponentImageFilter()
-    dgif            = sitk.DiscreteGaussianImageFilter()
-    eif             = sitk.EqualImageFilter()
-    hdif            = sitk.HausdorffDistanceImageFilter()
-    mapFilter       = sitk.LabelImageToLabelMapFilter()
-    lmmif           = sitk.LabelMapMaskImageFilter()
-    maskImageFilter = sitk.MaskImageFilter()
-    overlapFilter   = sitk.LabelOverlapMeasuresImageFilter()
-    #pasteFilter     = sitk.PasteImageFilter()
-    reader          = sitk.ImageFileReader()
-    statFilter      = sitk.StatisticsImageFilter()
-    writer          = sitk.ImageFileWriter()
-    xif             = sitk.MultiplyImageFilter()
-    
-    labelShapeFilter = sitk.LabelShapeStatisticsImageFilter()
-    trueLabelShapeFilter = sitk.LabelShapeStatisticsImageFilter()
-    trueLabelShapeFilter.SetComputeFeretDiameter(True)
+    aif                       = sitk.AddImageFilter()
+    btif                      = sitk.BinaryThresholdImageFilter()
+    castImageFilter           = sitk.CastImageFilter()
+    ccFilter                  = sitk.ConnectedComponentImageFilter()
+    dgif                      = sitk.DiscreteGaussianImageFilter()
+    eif                       = sitk.EqualImageFilter()
+    hdif                      = sitk.HausdorffDistanceImageFilter()
+    mapFilter                 = sitk.LabelImageToLabelMapFilter()
+    lmmif                     = sitk.LabelMapMaskImageFilter()
+    maskImageFilter           = sitk.MaskImageFilter()
+    overlapFilter             = sitk.LabelOverlapMeasuresImageFilter()
+    reader                    = sitk.ImageFileReader()
+    statFilter                = sitk.StatisticsImageFilter()
+    writer                    = sitk.ImageFileWriter()
+    xif                       = sitk.MultiplyImageFilter()
+    labelShapeFilter          = sitk.LabelShapeStatisticsImageFilter()
+    trueLabelShapeFilter      = sitk.LabelShapeStatisticsImageFilter()
     seededSegLabelShapeFilter = sitk.LabelShapeStatisticsImageFilter()
+    segLabelShapeFilter       = sitk.LabelShapeStatisticsImageFilter()
+    iwf                       = sitk.IntensityWindowingImageFilter()
+
     
-    #reader.SetFileName(image_path)
-    #image = reader.Execute()
+    trueLabelShapeFilter.SetComputeFeretDiameter(True)
+    reader.SetFileName(image_path)
+    image = reader.Execute()
     
     reader.SetFileName(label_path)
     trueLabel = reader.Execute()
@@ -143,6 +146,19 @@ for dataset in datasets:
     
     reader.SetFileName(prob_path)
     softmax = reader.Execute()
+    
+    # Standardize image
+    image_np = np.transpose(sitk.GetArrayFromImage(image),(1,2,0))
+    nonzero_voxels = image_np[image_np > 0.00001]
+    std = np.std(nonzero_voxels)
+    mean = np.mean(nonzero_voxels)
+    intensityWindowingFilter = sitk.IntensityWindowingImageFilter()
+    intensityWindowingFilter.SetOutputMaximum(255)
+    intensityWindowingFilter.SetOutputMinimum(0)
+    intensityWindowingFilter.SetWindowMaximum(mean+5.0*std)
+    intensityWindowingFilter.SetWindowMinimum(max(0.0, mean-5.0*std))
+    normalizedImage = intensityWindowingFilter.Execute(image)
+
     
     # True label computations for connected component analysis
     statFilter.Execute(trueLabel)
@@ -213,7 +229,6 @@ for dataset in datasets:
         segLabel = castImageFilter.Execute(segLabel)
         
         segLabelCC = ccFilter.Execute(segLabel)
-        segLabelShapeFilter = sitk.LabelShapeStatisticsImageFilter()
         segLabelShapeFilter.Execute(segLabelCC)
         segLabelMap=mapFilter.Execute(segLabelCC,0)
 
@@ -255,6 +270,19 @@ for dataset in datasets:
       # redefine list of nonartifacts here
       # no ignorant postprocessing to remove artifacts for right now
       nonartifacts = list(range(1, seededSegLabelShapeFilter.GetNumberOfLabels()+1))
+      for j in range(1, seededSegLabelShapeFilter.GetNumberOfLabels()+1):
+        lmmif.SetLabel(j)
+        predicted_lesion_image = lmmif.Execute(seededSegLabelMap, normalizedImage)
+        predicted_lesion = lmmif.Execute(seededSegLabelMap, seededSegLabel)
+        statFilter.Execute(predicted_lesion_image)
+        totalIntensity = statFilter.GetSum()
+        predicted_lesion_np = sitk.GetArrayFromImage(predicted_lesion)
+
+        nonzero_pred_voxels = predicted_lesion_np[predicted_lesion_np>0.]
+
+        if totalIntensity<1. or len(nonzero_pred_voxels)<7:
+          nonartifacts.remove(j)
+
       falsePositivesList = nonartifacts.copy()
       
       # List of true lesions that could be a false negative

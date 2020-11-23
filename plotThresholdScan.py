@@ -12,7 +12,7 @@ def truncate_colormap(cmap, minval=0.0, maxval=1.0, n=100):
     cmap(np.linspace(minval, maxval, n)))
   return new_cmap
 #rawdata=np.loadtxt(fname='/data/deasy/DylanHsu/thresholdScan_training-scanSizeV1mm3-bs1000-dr0p50-48mm.txt')
-rawdata=np.loadtxt(fname='/data/deasy/DylanHsu/N401_unstripped/stats/stats-48mm-minSmall5x-subgroupX.txt')
+rawdata=np.loadtxt(fname='/data/deasy/DylanHsu/SRS_N514/stats/stats-mrct-gammaSched-subgroupX.txt')
 det_thresholds=np.unique(rawdata[:,0])
 seg_thresholds=np.unique(rawdata[:,1])
 #print(det_thresholds,seg_thresholds)

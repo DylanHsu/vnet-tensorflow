@@ -12,6 +12,8 @@ import datetime
 from tensorflow.python import debug as tf_debug
 import logging
 import resource
+import faulthandler
+from glob import glob
 from dice import dice_coe
 
 console = logging.StreamHandler(sys.stdout)
@@ -21,6 +23,7 @@ logger = logging.getLogger('vnet_trainer')
 logger.addHandler(console)
 logger.setLevel(logging.DEBUG)
 logger.propagate = False
+faulthandler.enable()
 
 # select gpu devices
 os.environ["CUDA_VISIBLE_DEVICES"] = "0" # e.g. "0,1,2", "0,2" 
@@ -41,8 +44,8 @@ tf.app.flags.DEFINE_integer('batch_size',1,
     """Size of batch""")               
 tf.app.flags.DEFINE_integer('accum_batches',1,
     """Accumulate the gradient over this many batches before updating the gradient (1 = no accumulation)""")               
-tf.app.flags.DEFINE_integer('accum_batches_per_epoch',15,
-    """Accumulated batches per epoch""")               
+#tf.app.flags.DEFINE_integer('accum_batches_per_epoch',15,
+#    """Accumulated batches per epoch""")               
 tf.app.flags.DEFINE_integer('num_crops',1,
     """Take this many crops from each image, per epoch""")               
 tf.app.flags.DEFINE_integer('small_bias',1,
@@ -166,6 +169,13 @@ def train():
 
 
     with tf.Graph().as_default():
+        # Get images and labels
+        train_data_dir = os.path.join(FLAGS.data_dir,'training')
+        test_data_dir = os.path.join(FLAGS.data_dir,'testing')
+
+        n_training_data = len(glob(os.path.join(train_data_dir,'*')))
+        n_minibatches = math.ceil(n_training_data / float(FLAGS.accum_batches))
+        
         global_step = tf.train.get_or_create_global_step()
 
         # patch_shape(batch_size, height, width, depth, channels)
@@ -190,10 +200,6 @@ def train():
             #tf.summary.image("image", tf.transpose(images_log,[3,1,2,0]),max_outputs=FLAGS.patch_layer)
             #tf.summary.image("label", tf.transpose(labels_log,[3,1,2,0]),max_outputs=FLAGS.patch_layer)
 
-        # Get images and labels
-        train_data_dir = os.path.join(FLAGS.data_dir,'training')
-        test_data_dir = os.path.join(FLAGS.data_dir,'testing')
-        # support multiple image input, but here only use single channel, label file should be a single file with different classes
         
 
         # Force input pipepline to CPU:0 to avoid operations sometimes ended up at GPU and resulting a slow down
@@ -219,9 +225,18 @@ def train():
                 #NiftiDataset.Resample((0.45,0.45,0.45)),
                 ]
             
+            trainTransforms = [
+                NiftiDataset.Padding((FLAGS.patch_size, FLAGS.patch_size, FLAGS.patch_layer)),
+                NiftiDataset.RandomCrop((FLAGS.patch_size, FLAGS.patch_size, FLAGS.patch_layer),FLAGS.drop_ratio,FLAGS.min_pixel),
+                NiftiDataset.RandomNoise(0,0.1),
+                NiftiDataset.RandomNoise(1,0.1),
+                NiftiDataset.RandomFlip(0.5, [True,True,True]),
+                ]
+             
             testTransforms = [
                 NiftiDataset.StatisticalNormalization(0, 5.0, 5.0, nonzero_only=True, zero_floor=True),
-                NiftiDataset.ManualNormalization(1, 0, 100.),
+                NiftiDataset.StatisticalNormalization(1, 5.0, 5.0, nonzero_only=True, zero_floor=True),
+                #NiftiDataset.ManualNormalization(1, 0, 100.),
                 NiftiDataset.RandomCrop((FLAGS.patch_size, FLAGS.patch_size, FLAGS.patch_layer),0.5,FLAGS.min_pixel),
                 ]
             
@@ -234,7 +249,7 @@ def train():
                 train=True,
                 small_bias=FLAGS.small_bias,
                 small_bias_diameter=FLAGS.small_bias_diameter,
-                cpu_threads=8
+                cpu_threads=4
                 )
             
             trainDataset = TrainDataset.get_dataset()
@@ -255,7 +270,7 @@ def train():
                 transforms=testTransforms,
                 num_crops=FLAGS.num_crops, #10
                 train=True,
-                cpu_threads=8
+                cpu_threads=4
             )
 
             testDataset = TestDataset.get_dataset()
@@ -430,6 +445,10 @@ def train():
 
               boundary_loss_sum  = tf.get_variable("boundary_loss_sum" , dtype=tf.float32, trainable=False, initializer=tf.constant(0.))
               boundary_loss_op = tf.reduce_sum(tf.multiply(softmax_op[:,:,:,:,1], aux_placeholder[:,:,:,:,distance_map_aux_channel]))
+              # trying to normalize boundary loss here DGH
+              boundary_loss_guess = 0.5 * tf.reduce_sum(aux_placeholder[:,:,:,:,distance_map_aux_channel])
+              normed_boundary_loss_op = boundary_loss_op / boundary_loss_guess
+
               #print("shapes",softmax_op[:,:,:,:,1].get_shape(), aux_placeholder[:,:,:,:,distance_map_aux_channel].get_shape(), boundary_loss_op.get_shape())
               boundary_loss_batch = tf.cond(n_ab > 0., lambda: boundary_loss_sum/n_ab, lambda: tf.constant(0.)) 
               tf.summary.scalar('boundary_loss_batch',boundary_loss_batch)
@@ -490,11 +509,12 @@ def train():
 
             dice_loss_op    = 1. - soft_dice_batch
             jaccard_loss_op = 1. - soft_jaccard_batch
-            specific_dice_loss_op = 1. - specific_dice_batch
-            specific_jaccard_loss_op = 1. - specific_jaccard_batch
             
+            specific_jaccard_loss_op = 1. - specific_jaccard_batch
             if FLAGS.distance_map_index >= 0 and FLAGS.boundary_loss_weight != 0 :
-              specific_dice_loss_op += boundary_loss_batch * scalar_boundary_loss_weight
+              specific_dice_loss_op = (1. - scalar_boundary_loss_weight)*(1. - specific_dice_batch) + (scalar_boundary_loss_weight*boundary_loss_batch)
+            else:
+              specific_dice_loss_op = 1. - specific_dice_batch
 
             # Register these quantities in the Tensorboard output
             tf.summary.scalar('soft_dice_loss', dice_loss_op)
@@ -510,7 +530,8 @@ def train():
             if FLAGS.optimizer == "sgd":
                 optimizer = tf.train.GradientDescentOptimizer(learning_rate=FLAGS.init_learning_rate)
             elif FLAGS.optimizer == "adam":
-                optimizer = tf.train.AdamOptimizer(learning_rate=FLAGS.init_learning_rate)
+                #optimizer = tf.train.AdamOptimizer(learning_rate=FLAGS.init_learning_rate)
+                optimizer = tf.train.AdamOptimizer(learning_rate=FLAGS.init_learning_rate, epsilon=1e-3)
             elif FLAGS.optimizer == "momentum":
                 optimizer = tf.train.MomentumOptimizer(learning_rate=FLAGS.init_learning_rate, momentum=FLAGS.momentum)
             elif FLAGS.optimizer == "nesterov_momentum":
@@ -573,9 +594,11 @@ def train():
               # Operation to apply the accumulated gradients
             elif FLAGS.loss_function == 'specific_dice':
               # g_i: the gradient of the Dice metric for the i'th sample
-              specific_loss = (1. - specific_dice_op)
               if FLAGS.distance_map_index >= 0 and FLAGS.boundary_loss_weight!=0:
-                specific_loss += boundary_loss_op * scalar_boundary_loss_weight
+                #specific_loss += boundary_loss_op * scalar_boundary_loss_weight
+                specific_loss = (1. - scalar_boundary_loss_weight)*(1. - specific_dice_op) + (scalar_boundary_loss_weight)*(normed_boundary_loss_op)
+              else:
+                specific_loss = (1. - specific_dice_op)
               g_i = optimizer.compute_gradients(specific_loss)
               
               ##Tensor containing the weighted values of the nonzero label voxels
@@ -672,7 +695,9 @@ def train():
 
             if FLAGS.distance_map_index >= 0:
               sum_zero_op += [boundary_loss_sum.assign(tf.zeros_like(boundary_loss_sum))]
-              sum_accum_op += [boundary_loss_sum.assign_add(boundary_loss_op)]
+              # DGH known issue: boundary loss sum for Tensorboard scalars is not computed using normed version
+              #sum_accum_op += [boundary_loss_sum.assign_add(boundary_loss_op)]
+              sum_accum_op += [boundary_loss_sum.assign_add(normed_boundary_loss_op)]
         # # epoch checkpoint manipulation
         start_epoch = tf.get_variable("start_epoch", shape=[1], initializer= tf.zeros_initializer,dtype=tf.int32)
         start_epoch_inc = start_epoch.assign(start_epoch+1)
@@ -684,7 +709,7 @@ def train():
           checkpoint_slug = checkpoint_slug + "_" + FLAGS.batch_job_name
         checkpoint_prefix = os.path.join(FLAGS.checkpoint_dir, checkpoint_slug)
         print("Setting up Saver...")
-        #saver = tf.train.Saver(keep_checkpoint_every_n_hours=8,max_to_keep=1)
+        #saver = tf.train.Saver(keep_checkpoint_every_n_hours=8,max_to_keep=3)
         saver = tf.train.Saver(max_to_keep=3)
 
         #config = tf.ConfigProto(device_count={"CPU": 4})
@@ -750,7 +775,8 @@ def train():
               #while True: # Beginning of Accumulation batch
               #  try:
               batch_train_loss_sum = 0
-              for accum_batch in range(FLAGS.accum_batches_per_epoch):
+              #for accum_batch in range(FLAGS.accum_batches_per_epoch):
+              for accum_batch in range(n_minibatches):
                   logger.debug('Beginning loop over the accumulation crops')
                   #[image, label] = sess.run(next_element_train)
                   
@@ -817,9 +843,11 @@ def train():
                   sys.exit(1)
                 '''
               # Compute the average training loss across all batches in the epoch.
-              epoch_train_loss_avg = batch_train_loss_sum / float(FLAGS.accum_batches_per_epoch)
+              #epoch_train_loss_avg = batch_train_loss_sum / float(FLAGS.accum_batches_per_epoch)
+              epoch_train_loss_avg = batch_train_loss_sum / float(n_minibatches)
               
-              print("{0}: Average training loss is {1:.3f} over {2:d}".format(datetime.datetime.now(), epoch_train_loss_avg, FLAGS.accum_batches_per_epoch*n_accum_crops))
+              #print("{0}: Average training loss is {1:.3f} over {2:d}".format(datetime.datetime.now(), epoch_train_loss_avg, FLAGS.accum_batches_per_epoch*n_accum_crops))
+              print("{0}: Average training loss is {1:.3f} over {2:d}".format(datetime.datetime.now(), epoch_train_loss_avg, n_minibatches*n_accum_crops))
               start_epoch_inc.op.run()
               # print(start_epoch.eval())
               # save the model at end of each epoch training

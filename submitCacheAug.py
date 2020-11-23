@@ -7,7 +7,7 @@ jobfolder = "./jobs/"
 cpu_cores = 4 
 cpu_ram = 16
 #case_dir = "/data/deasy/DylanHsu/N401_unstripped/nifti/"
-case_dir = "/data/deasy/DylanHsu/SRS_N514/nifti/"
+case_dir = "/data/deasy/DylanHsu/SRS_N511/nifti/"
 # Clear job folder
 #old_jobs = glob(jobfolder + "*")
 #for oj in old_jobs:
@@ -33,7 +33,7 @@ for config in configs:
   f.write("#BSUB -q cpuqueue\n")
   f.write("#BSUB -R span[hosts=1]\n")
   f.write("#BSUB -R rusage[mem=%d]\n" % (cpu_ram//cpu_cores))
-  f.write("#BSUB -W 24:00\n")
+  f.write("#BSUB -W 5:00\n")
   f.write("#BSUB -o " +jobfolder+"/logs/"+jobname+"_%J.stdout\n")
   f.write("#BSUB -eo "+jobfolder+"/logs/"+jobname+"_%J.stderr\n")
   f.write("\n")

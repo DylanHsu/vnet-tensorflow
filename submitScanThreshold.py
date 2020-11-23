@@ -4,7 +4,7 @@ import numpy as np
 # Setup job configs
 
 jobfolder = "./jobs/"
-cpu_cores = 16
+cpu_cores = 4
 cpu_ram = 16
 
 roc_mode=False
@@ -26,22 +26,30 @@ suffixes = []
 #suffixes += ['48mm-mr-%s']
 #suffixes += ['48mm-mr-LB1-%s']
 #suffixes += ['48mm-mr-LB2-%s']
-suffixes += ['48mm-mrct-%s']
-suffixes += ['48mm-mrctfs-%s']
-suffixes += ['48mm-mrctfs-LB1-%s']
+#suffixes += ['48mm-mrct-%s']
+#suffixes += ['48mm-mrctfs-%s']
+#suffixes += ['48mm-mrctfs-LB1-%s']
 #suffixes += ['48mm-mrctfs-LB2-%s']
-suffixes += ['48mm-mrct-LB1-%s']
-suffixes += ['48mm-mrct-LB1-deep-%s']
-suffixes += ['48mm-mrct-LB1-dr0p00-%s']
-suffixes += ['48mm-mrct-LB1-dr0p75-%s']
-suffixes += ['40mm-mrct-LB1-%s']
-suffixes += ['48mm-mrct-LB2-%s']
-suffixes += ['56mm-mrct-LB1-%s']
-suffixes += ['64mm-mrct-LB1-%s']
+#suffixes += ['48mm-mrct-LB1-%s']
+#suffixes += ['48mm-mrct-LB1-deep-%s']
+#suffixes += ['48mm-mrct-LB1-dr0p00-%s']
+#suffixes += ['48mm-mrct-LB1-dr0p75-%s']
+#suffixes += ['40mm-mrct-LB1-%s']
+#suffixes += ['48mm-mrct-LB2-%s']
+#suffixes += ['56mm-mrct-LB1-%s']
+#suffixes += ['64mm-mrct-LB1-%s']
 
+#suffixes += ['48mm-mr2-%s']
+#suffixes += ['48mm-mr2-LB1-%s']
+#suffixes += ['48mm-mr2-LB2-%s']
+suffixes += ['48mm-mr2-LB3p3-%s']
+#suffixes += ['48mm-mr1mr2-%s']
+#suffixes += ['48mm-mr1mr2-LB1-%s']
+#suffixes += ['48mm-mr1mr2-LB2-%s']
+#suffixes += ['48mm-mr1mr2-LB3p3-%s']
 #groups = ['subgroup1','subgroup2','subgroup3','subgroup4','subgroup5']
-groups = ['subgroup1','subgroup2','subgroup3','subgroup4','subgroup5','final']
-#groups = ['final']
+#groups = ['subgroup1','subgroup2','subgroup3','subgroup4','subgroup5','final']
+groups = ['final']
 if roc_mode:
   # Linear sampling between P=0.01 and P=0.99
   # Logarithmic sampling outside that window
@@ -86,7 +94,7 @@ for suffix in suffixes:
         f.write(" -q cpuqueue")
         f.write(" -R span[hosts=1]")
         f.write(" -R rusage[mem=%d]" % (cpu_ram//cpu_cores))
-        f.write(" -W 12:00")
+        f.write(" -W 5:59")
         f.write(" -o " +os.path.join(jobfolder,'logs',sg_suffix,jobname+"_%J.stdout"))
         f.write(" -eo "+os.path.join(jobfolder,'logs',sg_suffix,jobname+"_%J.stderr"))
         f.write(" source /home/hsud3/.bash_profile;")
@@ -109,5 +117,5 @@ for suffix in suffixes:
 
 f.close()
 if packed > 0:
-  os.system("bsub -pack " + (jobfile % jobpack))
+  os.system("bsub -pack " + (jobfile % jobpack) + " 2>&1 | grep -v \"is submitted to queue\"")
 
